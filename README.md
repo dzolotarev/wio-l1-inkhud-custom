@@ -80,7 +80,7 @@ pio run -e seeed_wio_tracker_L1_eink-inkhud
 
 ## Скриншоты
 Программный захват кадра e-ink-панели в этом билде недоступен, поэтому это фотографии экрана
-(перспективная правка, ч/б, EXIF/GPS удалены) — `docs/screenshots/`.
+(без ретуши, метаданные EXIF/GPS срезаны) — `docs/screenshots/`.
 
 <p>
   <img src="docs/screenshots/01-nodes-list.jpg" width="200" alt="Список нод: MQTT-бейджи, SNR-бары, хоппы">
