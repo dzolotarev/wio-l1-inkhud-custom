@@ -1,0 +1,1460 @@
+From 83f9e5cdf1c6ee87ffc619abeaded31ee8576599 Mon Sep 17 00:00:00 2001
+From: Denis Zolotarev <judaeus@gmail.com>
+Date: Mon, 23 Nov 2026 12:29:30 +0200
+Subject: [PATCH 1/3] =?UTF-8?q?feat(inkhud):=20L1=20e-ink=20custom=20build?=
+ =?UTF-8?q?=20d5f1619=20=E2=80=94=20RU=20keyboard=20+=20win1251=20fonts,?=
+ =?UTF-8?q?=20chat/list=20scroll=20clamp,=20D13=20applet-cycle=20with=20ch?=
+ =?UTF-8?q?irp,=20Tetris=20applet=20(start-park,=20full-screen=20well,=20m?=
+ =?UTF-8?q?ulti-line=20clear=20fix);=20Favorites=20Map=20disabled?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../Applets/Bases/NodeList/NodeListApplet.cpp |  43 +-
+ .../Applets/Bases/NodeList/NodeListApplet.h   |   7 +
+ .../System/Keyboard/KeyboardApplet.cpp        |  46 +-
+ .../Applets/System/Keyboard/KeyboardApplet.h  |  14 +
+ .../InkHUD/Applets/System/Menu/MenuApplet.cpp |  22 +-
+ .../User/AllMessage/AllMessageApplet.cpp      |  57 +-
+ .../User/AllMessage/AllMessageApplet.h        |   6 +
+ .../niche/InkHUD/Applets/User/DM/DMApplet.cpp |  57 +-
+ .../niche/InkHUD/Applets/User/DM/DMApplet.h   |   6 +
+ .../Applets/User/Tetris/TetrisApplet.cpp      | 521 ++++++++++++++++++
+ .../InkHUD/Applets/User/Tetris/TetrisApplet.h |  84 +++
+ .../ThreadedMessage/ThreadedMessageApplet.cpp |  47 +-
+ .../ThreadedMessage/ThreadedMessageApplet.h   |   6 +
+ src/graphics/niche/InkHUD/Events.cpp          |  10 +-
+ src/graphics/niche/InkHUD/InkHUD.cpp          |  26 +
+ src/graphics/niche/InkHUD/InkHUD.h            |   1 +
+ .../nrf52840/seeed_wio_tracker_L1/variant.h   |   8 +-
+ .../seeed_wio_tracker_L1_eink/nicheGraphics.h |  21 +-
+ .../seeed_wio_tracker_L1_eink/platformio.ini  |   1 +
+ .../seeed_wio_tracker_L1_eink/variant.h       |  10 +-
+ 20 files changed, 923 insertions(+), 70 deletions(-)
+ create mode 100644 src/graphics/niche/InkHUD/Applets/User/Tetris/TetrisApplet.cpp
+ create mode 100644 src/graphics/niche/InkHUD/Applets/User/Tetris/TetrisApplet.h
+
+diff --git a/src/graphics/niche/InkHUD/Applets/Bases/NodeList/NodeListApplet.cpp b/src/graphics/niche/InkHUD/Applets/Bases/NodeList/NodeListApplet.cpp
+index 69dbf61af..1b75a21dd 100644
+--- a/src/graphics/niche/InkHUD/Applets/Bases/NodeList/NodeListApplet.cpp
++++ b/src/graphics/niche/InkHUD/Applets/Bases/NodeList/NodeListApplet.cpp
+@@ -14,6 +14,32 @@ InkHUD::NodeListApplet::NodeListApplet(const char *name) : MeshModule(name)
+     // We only need to be promiscuous in order to hear NodeInfo, apparently. See NodeInfoModule
+     // For all other packets, we manually act as if isPromiscuous=false, in wantPacket
+     MeshModule::isPromiscuous = true;
++
++    // Joystick up/down scroll the list; left/right still cycle applets (unsubscribed)
++    setInputsSubscribed(NAV_UP | NAV_DOWN, true);
++}
++
++void InkHUD::NodeListApplet::onNavUp()
++{
++    if (scrollOffset > 0) {
++        scrollOffset--;
++        requestUpdate();
++    }
++}
++
++void InkHUD::NodeListApplet::onNavDown()
++{
++    const int maxScroll = (int)cards.size() - (int)lastVisibleCards;
++    if ((int)scrollOffset < maxScroll) {
++        scrollOffset++;
++        requestUpdate();
++    }
++}
++
++void InkHUD::NodeListApplet::onForeground()
++{
++    Applet::onForeground();
++    scrollOffset = 0;
+ }
+ 
+ // Do we want to process this packet with handleReceived()?
+@@ -151,8 +177,23 @@ void InkHUD::NodeListApplet::onRender(bool full)
+         std::remove_if(cards.begin(), cards.end(), [](const CardInfo &c) { return nodeDB->getMeshNode(c.nodeNum) == nullptr; }),
+         cards.end());
+ 
++    // Clamp scroll into range, then offset the start of the loop
++    // - how many card slots fit in this tile determines the max scroll
++    const uint16_t listTopY = headerDivY + padDivH;
++    lastVisibleCards = (height() > listTopY) ? (height() - listTopY) / cardH : 1;
++    if (lastVisibleCards < 1)
++        lastVisibleCards = 1;
++    const int maxScroll = cards.empty() ? 0 : (int)cards.size() - (int)lastVisibleCards;
++    if (maxScroll < 0)
++        scrollOffset = 0;
++    else if ((int)scrollOffset > maxScroll)
++        scrollOffset = (uint16_t)maxScroll;
++
+     // -- Each node in list --
+-    for (auto card = cards.begin(); card != cards.end(); ++card) {
++    auto firstCard = cards.begin();
++    for (uint16_t skip = 0; skip < scrollOffset && firstCard != cards.end(); ++skip)
++        ++firstCard;
++    for (auto card = firstCard; card != cards.end(); ++card) {
+ 
+         // Gather info
+         // ========================================
+diff --git a/src/graphics/niche/InkHUD/Applets/Bases/NodeList/NodeListApplet.h b/src/graphics/niche/InkHUD/Applets/Bases/NodeList/NodeListApplet.h
+index baee3f0f4..6ee1aa808 100644
+--- a/src/graphics/niche/InkHUD/Applets/Bases/NodeList/NodeListApplet.h
++++ b/src/graphics/niche/InkHUD/Applets/Bases/NodeList/NodeListApplet.h
+@@ -48,6 +48,10 @@ class NodeListApplet : public Applet, public MeshModule
+ 
+     void onRender(bool full) override;
+ 
++    void onNavUp() override;    // Scroll toward the top of the list
++    void onNavDown() override;  // Scroll toward the bottom of the list
++    void onForeground() override;
++
+     bool wantPacket(const meshtastic_MeshPacket *p) override;
+     ProcessMessage handleReceived(const meshtastic_MeshPacket &mp) override;
+ 
+@@ -67,6 +71,9 @@ class NodeListApplet : public Applet, public MeshModule
+     // - for rendering and for maxCards calc
+     uint8_t cardMarginH = 1; // Gap between cards (minimal to fit more rows)
+     uint16_t cardH = fontMedium.lineHeight() + fontSmall.lineHeight() + cardMarginH; // Height of card
++
++    uint16_t scrollOffset = 0;   // Index of the first card drawn
++    uint16_t lastVisibleCards = 1; // Cards which fit, measured at last render (clamps scroll)
+ };
+ 
+ } // namespace NicheGraphics::InkHUD
+diff --git a/src/graphics/niche/InkHUD/Applets/System/Keyboard/KeyboardApplet.cpp b/src/graphics/niche/InkHUD/Applets/System/Keyboard/KeyboardApplet.cpp
+index ee7ceeb6b..b876f7e97 100644
+--- a/src/graphics/niche/InkHUD/Applets/System/Keyboard/KeyboardApplet.cpp
++++ b/src/graphics/niche/InkHUD/Applets/System/Keyboard/KeyboardApplet.cpp
+@@ -75,7 +75,7 @@ void InkHUD::KeyboardApplet::renderLegacyKeyboard(bool full)
+                     fgcolor = WHITE;
+                     fillRect(keyX, keyY, keyW, keyH, BLACK);
+                 }
+-                drawLegacyKeyLabel(keyX, keyY + keyTopPadding, keyW, legacyKeys[index], fgcolor);
++                drawLegacyKeyLabel(keyX, keyY + keyTopPadding, keyW, activeLegacyKeys()[index], fgcolor);
+                 xPos += legacyKeyWidths[index];
+             }
+         }
+@@ -89,7 +89,7 @@ void InkHUD::KeyboardApplet::renderLegacyKeyboard(bool full)
+         uint16_t keyY = row * keyH;
+         uint16_t keyW = (legacyKeyWidths[prevSelectedKey] * em) >> 4;
+         fillRect(keyX, keyY, keyW, keyH, WHITE);
+-        drawLegacyKeyLabel(keyX, keyY + keyTopPadding, keyW, legacyKeys[prevSelectedKey], BLACK);
++        drawLegacyKeyLabel(keyX, keyY + keyTopPadding, keyW, activeLegacyKeys()[prevSelectedKey], BLACK);
+ 
+         row = selectedKey / KBD_COLS;
+         keyXPadding = X(1.0) - ((legacyRowWidths[row] * em) >> 4);
+@@ -100,7 +100,7 @@ void InkHUD::KeyboardApplet::renderLegacyKeyboard(bool full)
+         keyY = row * keyH;
+         keyW = (legacyKeyWidths[selectedKey] * em) >> 4;
+         fillRect(keyX, keyY, keyW, keyH, BLACK);
+-        drawLegacyKeyLabel(keyX, keyY + keyTopPadding, keyW, legacyKeys[selectedKey], WHITE);
++        drawLegacyKeyLabel(keyX, keyY + keyTopPadding, keyW, activeLegacyKeys()[selectedKey], WHITE);
+     }
+ 
+     prevSelectedKey = selectedKey;
+@@ -125,14 +125,17 @@ void InkHUD::KeyboardApplet::drawLegacyKeyLabel(uint16_t left, uint16_t top, uin
+         drawBitmap(left + leftPadding, top + 1, spaceBitmap, 13, 9, color);
+     } else if (key == '\x1b') {
+         setTextColor(color);
+-        std::string keyText = "ESC";
++        std::string keyText = ruLayout ? "EN" : "RU"; // Toggle key: shows the layout you'd switch to
+         uint16_t leftPadding = (width - getTextWidth(keyText)) >> 1;
+         printAt(left + leftPadding, top, keyText);
+     } else {
+         setTextColor(color);
+-        if (key >= 0x61)
+-            key -= 32;
+-        std::string keyText = std::string(1, key);
++        uint8_t k = (uint8_t)key;
++        if (k >= 0x61 && k <= 0x7A)
++            k -= 32; // ASCII a-z -> A-Z
++        else if (k >= 0xE0)
++            k -= 32; // WIN1251 а-я -> А-Я
++        std::string keyText = std::string(1, (char)k);
+         uint16_t leftPadding = (width - getTextWidth(keyText)) >> 1;
+         printAt(left + leftPadding, top, keyText);
+     }
+@@ -223,17 +226,34 @@ void InkHUD::KeyboardApplet::onButtonLongPress()
+ 
+ void InkHUD::KeyboardApplet::handleLegacyInput(bool longPress)
+ {
+-    char key = legacyKeys[selectedKey];
++    char key = activeLegacyKeys()[selectedKey];
+     if (key == '\n') {
+         inkhud->freeTextDone();
+         inkhud->closeKeyboard();
+     } else if (key == '\x1b') {
+-        inkhud->freeTextCancel();
+-        inkhud->closeKeyboard();
++        // RU/EN toggle (replaces the old ESC/cancel). Stay on the keyboard.
++        ruLayout = !ruLayout;
++        requestFastKeyboardRefresh(true);
++        // Without forceUpdate the re-render is only scheduled, not pushed to the display:
++        // the next partial update would repaint just the two moved cells, leaving every
++        // other key showing the old layout.
++        inkhud->forceUpdate(EInk::UpdateTypes::FAST);
+     } else {
+-        if (longPress && key >= 0x61)
+-            key -= 32;
+-        inkhud->freeText(key);
++        uint8_t k = (uint8_t)key;
++        if (longPress) {
++            if (k >= 0x61 && k <= 0x7A)
++                k -= 32; // ASCII uppercase
++            else if (k >= 0xE0)
++                k -= 32; // WIN1251 uppercase
++        }
++        if (ruLayout && k >= 0xC0) {
++            // WIN1251 Cyrillic (А-я) -> UTF-8, injected as two bytes
++            uint16_t cp = 0x0410 + (k - 0xC0);
++            inkhud->freeText((char)(0xC0 | (cp >> 6)));
++            inkhud->freeText((char)(0x80 | (cp & 0x3F)));
++        } else {
++            inkhud->freeText((char)k);
++        }
+     }
+ }
+ 
+diff --git a/src/graphics/niche/InkHUD/Applets/System/Keyboard/KeyboardApplet.h b/src/graphics/niche/InkHUD/Applets/System/Keyboard/KeyboardApplet.h
+index 65ddcf2a4..1ac0d7738 100644
+--- a/src/graphics/niche/InkHUD/Applets/System/Keyboard/KeyboardApplet.h
++++ b/src/graphics/niche/InkHUD/Applets/System/Keyboard/KeyboardApplet.h
+@@ -139,6 +139,7 @@ class KeyboardApplet : public SystemApplet
+     uint8_t selectedKey = 0;
+     uint8_t prevSelectedKey = 0;
+     uint8_t emotePage = 0;
++    bool ruLayout = false; // Legacy keyboard: false = EN (QWERTY), true = RU (ЙЦУКЕН)
+     KeyboardMode mode = MODE_TEXT;
+     KeyboardMode lastTypingMode = MODE_TEXT;
+     static constexpr uint8_t KEY_GAP_X = 3;
+@@ -152,6 +153,19 @@ class KeyboardApplet : public SystemApplet
+         'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '?', '\x1b' // row 3
+     };
+ 
++    // Russian (ЙЦУКЕН) legacy layout. Letters are WIN1251 bytes (the font encoding);
++    // handleLegacyInput converts them to UTF-8 before injecting. The ESC slot ('\x1b')
++    // is the RU/EN toggle. To fit 30 letters, '!' ',' '.' '?' become ж б ю х; ъ, ё, э
++    // are omitted. Punctuation (, . ?) is available by switching back to EN.
++    const char legacyKeysRU[LEGACY_KBD_KEY_COUNT] = {
++        '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '\b',                                  // row 0
++        '\xe9', '\xf6', '\xf3', '\xea', '\xe5', '\xed', '\xe3', '\xf8', '\xf9', '\xe7', '\n',      // row 1: й ц у к е н г ш щ з
++        '\xf4', '\xfb', '\xe2', '\xe0', '\xef', '\xf0', '\xee', '\xeb', '\xe4', '\xe6', ' ',       // row 2: ф ы в а п р о л д ж
++        '\xff', '\xf7', '\xf1', '\xec', '\xe8', '\xf2', '\xfc', '\xe1', '\xfe', '\xf5', '\x1b'     // row 3: я ч с м и т ь б ю х
++    };
++
++    const char *activeLegacyKeys() const { return ruLayout ? legacyKeysRU : legacyKeys; }
++
+     const uint16_t legacyKeyWidths[LEGACY_KBD_KEY_COUNT] = {
+         16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 24, // row 0
+         16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 24, // row 1
+diff --git a/src/graphics/niche/InkHUD/Applets/System/Menu/MenuApplet.cpp b/src/graphics/niche/InkHUD/Applets/System/Menu/MenuApplet.cpp
+index 3393bb4d6..f4e4e048a 100644
+--- a/src/graphics/niche/InkHUD/Applets/System/Menu/MenuApplet.cpp
++++ b/src/graphics/niche/InkHUD/Applets/System/Menu/MenuApplet.cpp
+@@ -2326,8 +2326,15 @@ void InkHUD::MenuApplet::onFreeText(char c)
+     if (cm.freeTextItem.rawText.length() >= menuTextLimit && c != '\b')
+         return;
+     if (c == '\b') {
+-        if (!cm.freeTextItem.rawText.empty())
+-            cm.freeTextItem.rawText.pop_back();
++        // Remove a whole UTF-8 character: walk back over continuation bytes to the lead byte
++        std::string &buf = cm.freeTextItem.rawText;
++        if (!buf.empty()) {
++            size_t i = buf.size();
++            do {
++                i--;
++            } while (i > 0 && ((uint8_t)buf[i] & 0xC0) == 0x80);
++            buf.erase(i);
++        }
+     } else {
+         cm.freeTextItem.rawText += c;
+     }
+@@ -2570,6 +2577,9 @@ void InkHUD::MenuApplet::drawInputField(uint16_t left, uint16_t top, uint16_t wi
+     setFont(fontSmall);
+     uint16_t wrapMaxH = 0;
+ 
++    // The input buffer holds UTF-8 (keyboard injects UTF-8); re-encode to the font for display
++    const std::string shown = parse(text);
++
+     // Draw the text, input box, and cursor
+     // Adjusting the box for screen height
+     while (wrapMaxH < height - fontSmall.lineHeight()) {
+@@ -2577,13 +2587,13 @@ void InkHUD::MenuApplet::drawInputField(uint16_t left, uint16_t top, uint16_t wi
+     }
+ 
+     // If the text is so long that it goes outside of the input box, the text is actually rendered off screen.
+-    uint32_t textHeight = getWrappedTextHeight(0, width - 5, text);
+-    if (!text.empty()) {
++    uint32_t textHeight = getWrappedTextHeight(0, width - 5, shown);
++    if (!shown.empty()) {
+         uint16_t textPadding = X(1.0) > Y(1.0) ? wrapMaxH - textHeight : wrapMaxH - textHeight + 1;
+         if (textHeight > wrapMaxH)
+-            printWrapped(2, textPadding, width - 5, text);
++            printWrapped(2, textPadding, width - 5, shown);
+         else
+-            printWrapped(2, top + 2, width - 5, text);
++            printWrapped(2, top + 2, width - 5, shown);
+     }
+ 
+     uint16_t textCursorX = text.empty() ? 1 : getCursorX();
+diff --git a/src/graphics/niche/InkHUD/Applets/User/AllMessage/AllMessageApplet.cpp b/src/graphics/niche/InkHUD/Applets/User/AllMessage/AllMessageApplet.cpp
+index 740af32a7..4150f5f7c 100644
+--- a/src/graphics/niche/InkHUD/Applets/User/AllMessage/AllMessageApplet.cpp
++++ b/src/graphics/niche/InkHUD/Applets/User/AllMessage/AllMessageApplet.cpp
+@@ -9,11 +9,13 @@ using namespace NicheGraphics;
+ void InkHUD::AllMessageApplet::onActivate()
+ {
+     textMessageObserver.observe(textMessageModule);
++    setInputsSubscribed(NAV_UP | NAV_DOWN, true);
+ }
+ 
+ void InkHUD::AllMessageApplet::onDeactivate()
+ {
+     textMessageObserver.unobserve(textMessageModule);
++    setInputsSubscribed(NAV_UP | NAV_DOWN, false);
+ }
+ 
+ // We're not consuming the data passed to this method;
+@@ -29,6 +31,8 @@ int InkHUD::AllMessageApplet::onReceiveTextMessage(const meshtastic_MeshPacket *
+     if (getFrom(p) == nodeDB->getNodeNum())
+         return 0;
+ 
++    scrollPx = 0; // A fresh message starts at the top
++
+     requestAutoshow(); // Want to become foreground, if permitted
+     requestUpdate();   // Want to update display, if applet is foreground
+ 
+@@ -107,22 +111,49 @@ void InkHUD::AllMessageApplet::onRender(bool full)
+     uint32_t textHeight;
+     setFont(fontLarge);
+     textHeight = getWrappedTextHeight(0, width(), text);
+-    if (textHeight <= (uint32_t)height()) {
+-        printWrapped(0, textTop, width(), text);
+-        return;
++    if (textHeight > (uint32_t)height()) {
++        // Fallback (too large): attempt to print with fontMedium
++        setFont(fontMedium);
++        textHeight = getWrappedTextHeight(0, width(), text);
+     }
+-
+-    // Fallback (too large): attempt to print with fontMedium
+-    setFont(fontMedium);
+-    textHeight = getWrappedTextHeight(0, width(), text);
+-    if (textHeight <= (uint32_t)height()) {
+-        printWrapped(0, textTop, width(), text);
+-        return;
++    if (textHeight > (uint32_t)height()) {
++        // Fallback (too large): print with fontSmall
++        setFont(fontSmall);
++        textHeight = getWrappedTextHeight(0, width(), text);
+     }
+ 
+-    // Fallback (too large): print with fontSmall
+-    setFont(fontSmall);
+-    printWrapped(0, textTop, width(), text);
++    // Scroll through text which doesn't fit: joystick up/down shift the body
++    const int16_t availH = height() - textTop;
++    int16_t maxScroll = ((int32_t)textHeight > availH) ? ((int32_t)textHeight - availH) : 0;
++    if (scrollPx > maxScroll)
++        scrollPx = maxScroll;
++    if (scrollPx < 0)
++        scrollPx = 0;
++
++    // Clip to the content region so scrolled text never overdraws the header
++    setCrop(0, textTop, width(), availH);
++    printWrapped(0, textTop - scrollPx, width(), text);
++    resetCrop();
++}
++
++void InkHUD::AllMessageApplet::onNavUp()
++{
++    scrollPx -= fontSmall.lineHeight();
++    if (scrollPx < 0)
++        scrollPx = 0;
++    requestUpdate();
++}
++
++void InkHUD::AllMessageApplet::onNavDown()
++{
++    scrollPx += fontSmall.lineHeight();
++    requestUpdate();
++}
++
++void InkHUD::AllMessageApplet::onForeground()
++{
++    Applet::onForeground();
++    scrollPx = 0;
+ }
+ 
+ // Don't show notifications for text messages when our applet is displayed
+diff --git a/src/graphics/niche/InkHUD/Applets/User/AllMessage/AllMessageApplet.h b/src/graphics/niche/InkHUD/Applets/User/AllMessage/AllMessageApplet.h
+index c96b3208c..a59240cc0 100644
+--- a/src/graphics/niche/InkHUD/Applets/User/AllMessage/AllMessageApplet.h
++++ b/src/graphics/niche/InkHUD/Applets/User/AllMessage/AllMessageApplet.h
+@@ -31,6 +31,10 @@ class AllMessageApplet : public Applet
+   public:
+     void onRender(bool full) override;
+ 
++    void onNavUp() override;   // Scroll long message text upward
++    void onNavDown() override; // Scroll long message text downward
++    void onForeground() override;
++
+     void onActivate() override;
+     void onDeactivate() override;
+     int onReceiveTextMessage(const meshtastic_MeshPacket *p);
+@@ -38,6 +42,8 @@ class AllMessageApplet : public Applet
+     bool approveNotification(Notification &n) override; // Which notifications to suppress
+ 
+   protected:
++    int16_t scrollPx = 0; // Vertical scroll of the message body, in pixels
++
+     // Used to register our text message callback
+     CallbackObserver<AllMessageApplet, const meshtastic_MeshPacket *> textMessageObserver =
+         CallbackObserver<AllMessageApplet, const meshtastic_MeshPacket *>(this, &AllMessageApplet::onReceiveTextMessage);
+diff --git a/src/graphics/niche/InkHUD/Applets/User/DM/DMApplet.cpp b/src/graphics/niche/InkHUD/Applets/User/DM/DMApplet.cpp
+index 9f1471c90..ed21e9383 100644
+--- a/src/graphics/niche/InkHUD/Applets/User/DM/DMApplet.cpp
++++ b/src/graphics/niche/InkHUD/Applets/User/DM/DMApplet.cpp
+@@ -9,11 +9,13 @@ using namespace NicheGraphics;
+ void InkHUD::DMApplet::onActivate()
+ {
+     textMessageObserver.observe(textMessageModule);
++    setInputsSubscribed(NAV_UP | NAV_DOWN, true);
+ }
+ 
+ void InkHUD::DMApplet::onDeactivate()
+ {
+     textMessageObserver.unobserve(textMessageModule);
++    setInputsSubscribed(NAV_UP | NAV_DOWN, false);
+ }
+ 
+ // We're not consuming the data passed to this method;
+@@ -27,6 +29,8 @@ int InkHUD::DMApplet::onReceiveTextMessage(const meshtastic_MeshPacket *p)
+ 
+     // If DM (not broadcast)
+     if (!isBroadcast(p->to)) {
++        scrollPx = 0; // A fresh message starts at the top
++
+         // Want to update display, if applet is foreground
+         requestUpdate();
+ 
+@@ -103,22 +107,49 @@ void InkHUD::DMApplet::onRender(bool full)
+     uint32_t textHeight;
+     setFont(fontLarge);
+     textHeight = getWrappedTextHeight(0, width(), text);
+-    if (textHeight <= (uint32_t)height()) {
+-        printWrapped(0, textTop, width(), text);
+-        return;
++    if (textHeight > (uint32_t)height()) {
++        // Fallback (too large): attempt to print with fontMedium
++        setFont(fontMedium);
++        textHeight = getWrappedTextHeight(0, width(), text);
+     }
+-
+-    // Fallback (too large): attempt to print with fontMedium
+-    setFont(fontMedium);
+-    textHeight = getWrappedTextHeight(0, width(), text);
+-    if (textHeight <= (uint32_t)height()) {
+-        printWrapped(0, textTop, width(), text);
+-        return;
++    if (textHeight > (uint32_t)height()) {
++        // Fallback (too large): print with fontSmall
++        setFont(fontSmall);
++        textHeight = getWrappedTextHeight(0, width(), text);
+     }
+ 
+-    // Fallback (too large): print with fontSmall
+-    setFont(fontSmall);
+-    printWrapped(0, textTop, width(), text);
++    // Scroll through text which doesn't fit: joystick up/down shift the body
++    const int16_t availH = height() - textTop;
++    int16_t maxScroll = ((int32_t)textHeight > availH) ? ((int32_t)textHeight - availH) : 0;
++    if (scrollPx > maxScroll)
++        scrollPx = maxScroll;
++    if (scrollPx < 0)
++        scrollPx = 0;
++
++    // Clip to the content region so scrolled text never overdraws the header
++    setCrop(0, textTop, width(), availH);
++    printWrapped(0, textTop - scrollPx, width(), text);
++    resetCrop();
++}
++
++void InkHUD::DMApplet::onNavUp()
++{
++    scrollPx -= fontSmall.lineHeight();
++    if (scrollPx < 0)
++        scrollPx = 0;
++    requestUpdate();
++}
++
++void InkHUD::DMApplet::onNavDown()
++{
++    scrollPx += fontSmall.lineHeight();
++    requestUpdate();
++}
++
++void InkHUD::DMApplet::onForeground()
++{
++    Applet::onForeground();
++    scrollPx = 0;
+ }
+ 
+ // Don't show notifications for direct messages when our applet is displayed
+diff --git a/src/graphics/niche/InkHUD/Applets/User/DM/DMApplet.h b/src/graphics/niche/InkHUD/Applets/User/DM/DMApplet.h
+index f7ddbb4df..839c05149 100644
+--- a/src/graphics/niche/InkHUD/Applets/User/DM/DMApplet.h
++++ b/src/graphics/niche/InkHUD/Applets/User/DM/DMApplet.h
+@@ -31,6 +31,10 @@ class DMApplet : public Applet
+   public:
+     void onRender(bool full) override;
+ 
++    void onNavUp() override;   // Scroll long message text upward
++    void onNavDown() override; // Scroll long message text downward
++    void onForeground() override;
++
+     void onActivate() override;
+     void onDeactivate() override;
+     int onReceiveTextMessage(const meshtastic_MeshPacket *p);
+@@ -38,6 +42,8 @@ class DMApplet : public Applet
+     bool approveNotification(Notification &n) override; // Which notifications to suppress
+ 
+   protected:
++    int16_t scrollPx = 0; // Vertical scroll of the message body, in pixels
++
+     // Used to register our text message callback
+     CallbackObserver<DMApplet, const meshtastic_MeshPacket *> textMessageObserver =
+         CallbackObserver<DMApplet, const meshtastic_MeshPacket *>(this, &DMApplet::onReceiveTextMessage);
+diff --git a/src/graphics/niche/InkHUD/Applets/User/Tetris/TetrisApplet.cpp b/src/graphics/niche/InkHUD/Applets/User/Tetris/TetrisApplet.cpp
+new file mode 100644
+index 000000000..36c0315a1
+--- /dev/null
++++ b/src/graphics/niche/InkHUD/Applets/User/Tetris/TetrisApplet.cpp
+@@ -0,0 +1,521 @@
++#ifdef MESHTASTIC_INCLUDE_INKHUD
++
++#include "./TetrisApplet.h"
++
++#include <algorithm>
++
++#include "buzz/buzz.h"
++
++using namespace NicheGraphics;
++
++// Piece definitions: four cells inside an NxN box, rotation 0.
++// Rotations are derived by (x,y) -> (N-1-y, x), applied rot times.
++struct TetrisShape {
++    uint8_t n;                     // Bounding box size
++    int8_t cells[4][2];            // (x,y) at rotation 0
++};
++static const TetrisShape shapes[7] = {
++    /* I */ {4, {{1, 0}, {1, 1}, {1, 2}, {1, 3}}},
++    /* O */ {2, {{0, 0}, {1, 0}, {0, 1}, {1, 1}}},
++    /* T */ {3, {{1, 0}, {0, 1}, {1, 1}, {2, 1}}},
++    /* S */ {3, {{1, 0}, {2, 0}, {0, 1}, {1, 1}}},
++    /* Z */ {3, {{0, 0}, {1, 0}, {1, 1}, {2, 1}}},
++    /* L */ {3, {{2, 0}, {0, 1}, {1, 1}, {2, 1}}},
++    /* J */ {3, {{0, 0}, {0, 1}, {1, 1}, {2, 1}}},
++};
++
++// Cell of a piece's bounding box, after rotation
++static void rotatedCell(uint8_t type, uint8_t rot, uint8_t i, int8_t &x, int8_t &y)
++{
++    const TetrisShape &s = shapes[type];
++    x = s.cells[i][0];
++    y = s.cells[i][1];
++    for (uint8_t r = 0; r < (rot % 4); r++) {
++        int8_t nx = (int8_t)(s.n - 1) - y;
++        int8_t ny = x;
++        x = nx;
++        y = ny;
++    }
++}
++
++bool InkHUD::TetrisApplet::fits(uint8_t type, uint8_t rot, int8_t px, int8_t py)
++{
++    for (uint8_t i = 0; i < 4; i++) {
++        int8_t cx, cy;
++        rotatedCell(type, rot, i, cx, cy);
++        int8_t bx = px + cx;
++        int8_t by = py + cy;
++        if (bx < 0 || bx >= (int8_t)boardCols || by < 0 || by >= (int8_t)rows)
++            return false;
++        if (grid[by][bx])
++            return false;
++    }
++    return true;
++}
++
++void InkHUD::TetrisApplet::resetGame()
++{
++    memset(grid, 0, sizeof(grid));
++    score = 0;
++    lines = 0;
++    level = 0;
++    gameOver = false;
++    paused = false;
++    nextType = pickPiece();
++    spawn(); // Seed the first active piece; also flags gameOver if the fresh board can't hold it
++}
++
++uint8_t InkHUD::TetrisApplet::pickPiece()
++{
++    return (uint8_t)random(0, 7);
++}
++
++void InkHUD::TetrisApplet::spawn()
++{
++    curType = nextType;
++    nextType = pickPiece();
++    curRot = 0;
++    curX = 3;
++    curY = 0;
++    if (!fits(curType, curRot, curX, curY)) {
++        gameOver = true;
++        play4ClickDown();
++    }
++}
++
++void InkHUD::TetrisApplet::lockPiece()
++{
++    for (uint8_t i = 0; i < 4; i++) {
++        int8_t cx, cy;
++        rotatedCell(curType, curRot, i, cx, cy);
++        int8_t bx = curX + cx;
++        int8_t by = curY + cy;
++        if (by >= 0 && by < (int8_t)rows && bx >= 0 && bx < (int8_t)boardCols)
++            grid[by][bx] = 1;
++    }
++    clearLines();
++    spawn();
++}
++
++void InkHUD::TetrisApplet::clearLines()
++{
++    uint16_t cleared = 0;
++    int8_t r = (int8_t)rows - 1;
++    while (r >= 0) {
++        bool full = true;
++        for (uint8_t c = 0; c < boardCols; c++) {
++            if (!grid[r][c]) {
++                full = false;
++                break;
++            }
++        }
++        if (!full) {
++            r--;
++            continue;
++        }
++        // Drop everything above this row down one
++        for (uint8_t c = 0; c < boardCols; c++) {
++            for (int8_t y = r; y > 0; y--)
++                grid[y][c] = grid[y - 1][c];
++            grid[0][c] = 0;
++        }
++        cleared++;
++        // Stay on row r: after the shift it holds the row that was above, which
++        // must be re-checked or consecutive full lines are missed (one per lock).
++    }
++    if (cleared == 0)
++        return;
++
++    static const uint16_t table[5] = {0, 100, 300, 500, 800};
++    score += table[cleared] * (level + 1);
++    lines += cleared;
++    level = (lines / 10 > 9) ? 9 : (lines / 10);
++
++    if (cleared >= 4)
++        playComboTune();
++    else if (cleared >= 2)
++        playStartMelody();
++    else
++        playBoop();
++}
++
++void InkHUD::TetrisApplet::stepDown(bool soft)
++{
++    if (fits(curType, curRot, curX, curY + 1)) {
++        curY++;
++        if (soft)
++            score += 1;
++    } else {
++        lockPiece();
++    }
++}
++
++void InkHUD::TetrisApplet::hardDropInfo(int8_t *ghostY)
++{
++    int8_t y = curY;
++    while (fits(curType, curRot, curX, y + 1))
++        y++;
++    *ghostY = y;
++}
++
++uint32_t InkHUD::TetrisApplet::gravityIntervalMs()
++{
++    uint32_t ms = 700 - (uint32_t)level * 50;
++    return (ms < 220) ? 220 : ms;
++}
++
++// Size the playfield to the tile: pick a square cell that fills the available area,
++// then derive the live row count so the well uses (almost) the whole screen.
++// Portrait (height > width, the L1 default at rotation=1): the well spans nearly the
++// full width and the HUD moves into a bottom strip. Landscape: well left, HUD right.
++void InkHUD::TetrisApplet::configureBoard()
++{
++    const int16_t headerH = Applet::getHeaderHeight();
++    const int16_t availH = height() - headerH - 2;
++    const bool portrait = height() > width();
++
++    int16_t c;
++    int r;
++    if (portrait) {
++        c = (width() - 6) / boardCols; // well nearly full width
++        if (c > 14)
++            c = 14;
++        if (c < 4)
++            c = 4;
++        const int16_t hudStrip = fontSmall.lineHeight() * 2 + 7; // bottom strip: stats line + hint line
++        r = (availH - hudStrip) / c;
++        if (r > MAX_ROWS)
++            r = MAX_ROWS;
++        if (r < 10)
++            r = 10;
++        const int16_t cH = (availH - hudStrip) / r;
++        if (cH < c)
++            c = cH;
++        if (c < 4)
++            c = 4;
++    } else {
++        int16_t hudReserve = (int16_t)(width() * 28 / 100);
++        const int16_t hudMin = fontSmall.lineHeight() * 5;
++        if (hudReserve < hudMin)
++            hudReserve = hudMin;
++        int16_t availWBudget = width() - hudReserve - 6;
++        if (availWBudget < (int16_t)(boardCols * 4))
++            availWBudget = boardCols * 4;
++
++        c = availWBudget / boardCols;
++        if (c < 4)
++            c = 4;
++        const int16_t cellByW = c;
++        r = availH / cellByW;
++        if (r > MAX_ROWS)
++            r = MAX_ROWS;
++        if (r < 11)
++            r = 11;
++        const int16_t cellByH = availH / r;
++        if (cellByH < c)
++            c = cellByH;
++    }
++    if (c > 16)
++        c = 16;
++    if (c < 4)
++        c = 4;
++
++    rows = (uint8_t)r;
++    cell = (uint8_t)c;
++
++    // Drop any settled blocks that fell outside a now-shrunken well.
++    for (uint8_t rr = rows; rr < MAX_ROWS; rr++)
++        for (uint8_t cc = 0; cc < boardCols; cc++)
++            grid[rr][cc] = 0;
++}
++
++// -- OSThread: gravity --
++int32_t InkHUD::TetrisApplet::runOnce()
++{
++    if (!isActive() || !isForeground() || paused || gameOver)
++        return OSThread::interval;
++
++    stepDown(false);
++    requestUpdate(Drivers::EInk::UpdateTypes::FAST);
++    OSThread::setIntervalFromNow(gravityIntervalMs());
++    return OSThread::interval;
++}
++
++// -- Input --
++void InkHUD::TetrisApplet::onNavLeft()
++{
++    if (paused || gameOver)
++        return;
++    if (fits(curType, curRot, curX - 1, curY)) {
++        curX--;
++        playClick();
++        requestUpdate(Drivers::EInk::UpdateTypes::FAST);
++    }
++}
++
++void InkHUD::TetrisApplet::onNavRight()
++{
++    if (paused || gameOver)
++        return;
++    if (fits(curType, curRot, curX + 1, curY)) {
++        curX++;
++        playClick();
++        requestUpdate(Drivers::EInk::UpdateTypes::FAST);
++    }
++}
++
++void InkHUD::TetrisApplet::onNavUp() // Rotate, with tiny wall kicks
++{
++    if (paused || gameOver)
++        return;
++    uint8_t rot = (curRot + 1) % 4;
++    static const int8_t kicks[5] = {0, -1, 1, -2, 2};
++    for (int8_t k : kicks) {
++        if (fits(curType, rot, (int8_t)(curX + k), curY)) {
++            curRot = rot;
++            curX += k;
++            playChirp();
++            requestUpdate(Drivers::EInk::UpdateTypes::FAST);
++            return;
++        }
++    }
++}
++
++void InkHUD::TetrisApplet::onNavDown() // Soft drop
++{
++    if (paused || gameOver)
++        return;
++    stepDown(true);
++    OSThread::setIntervalFromNow(gravityIntervalMs()); // Reset gravity clock after manual step
++    requestUpdate(Drivers::EInk::UpdateTypes::FAST);
++}
++
++void InkHUD::TetrisApplet::onButtonShortPress() // Pause / restart
++{
++    if (gameOver) {
++        resetGame();
++        awaitingStart = false;
++        OSThread::setIntervalFromNow(gravityIntervalMs());
++        requestUpdate();
++        return;
++    }
++    paused = !paused;
++    if (!paused)
++        awaitingStart = false; // The click that un-parks a fresh board starts the game
++    playBoop();
++    requestUpdate();
++}
++
++// -- Lifecycle --
++void InkHUD::TetrisApplet::onActivate()
++{
++    setInputsSubscribed(NAV_UP | NAV_DOWN | NAV_LEFT | NAV_RIGHT | BUTTON_SHORT, true);
++}
++
++void InkHUD::TetrisApplet::onDeactivate()
++{
++    setInputsSubscribed(NAV_UP | NAV_DOWN | NAV_LEFT | NAV_RIGHT | BUTTON_SHORT, false);
++    OSThread::disable();
++}
++
++void InkHUD::TetrisApplet::onForeground()
++{
++    configureBoard();
++    if (!booted) {
++        resetGame();
++        booted = true;
++    }
++    // Don't start moving on tab entry: park the board until the user clicks to start.
++    paused = true;
++    awaitingStart = true;
++    OSThread::enabled = true;
++    OSThread::setIntervalFromNow(gravityIntervalMs());
++}
++
++void InkHUD::TetrisApplet::onBackground()
++{
++    OSThread::disable();
++    paused = true; // Leaving the tab stops the game; entry always waits for a start click
++}
++
++void InkHUD::TetrisApplet::onShutdown()
++{
++    paused = true; // Resume paused after reboot (board itself isn't persisted)
++}
++
++// -- Rendering --
++void InkHUD::TetrisApplet::onRender(bool full)
++{
++    drawHeader("Tetris");
++
++    configureBoard();
++    const int16_t headerH = Applet::getHeaderHeight();
++
++    const int16_t wellW = cell * boardCols;
++    const int16_t wellH = cell * rows;
++    const bool portrait = height() > width();
++    if (portrait) {
++        wellL = (width() - wellW) / 2; // nearly full width, centered
++        wellT = headerH + 1;          // top-aligned; HUD lives in the bottom strip
++    } else {
++        wellL = 2;
++        wellT = headerH + 1 + (height() - headerH - 2 - wellH) / 2; // center vertically
++    }
++    if (wellT < headerH + 1)
++        wellT = headerH + 1;
++
++    // Well: white field, black frame
++    fillRect(wellL - 1, wellT - 1, wellW + 3, wellH + 3, WHITE);
++    drawRect(wellL - 1, wellT - 1, wellW + 2, wellH + 2, BLACK);
++    drawRect(wellL, wellT, wellW, wellH, BLACK);
++
++    auto blockX = [&](int8_t bx) { return wellL + (int16_t)bx * cell; };
++    auto blockY = [&](int8_t by) { return wellT + (int16_t)by * cell; };
++
++    // Settled blocks: solid with a bright pixel top-left (chunky retro look)
++    for (uint8_t r = 0; r < rows; r++) {
++        for (uint8_t c = 0; c < boardCols; c++) {
++            if (!grid[r][c])
++                continue;
++            int16_t x = blockX(c), y = blockY(r);
++            fillRect(x + 1, y + 1, cell - 1, cell - 1, BLACK);
++            drawPixel(x + 1, y + 1, WHITE);
++        }
++    }
++
++    if (!gameOver) {
++        // Ghost: dashed outline where the piece would land
++        int8_t gy;
++        hardDropInfo(&gy);
++        for (uint8_t i = 0; i < 4; i++) {
++            int8_t cx, cy;
++            rotatedCell(curType, curRot, i, cx, cy);
++            int16_t x = blockX(curX + cx), y = blockY(gy + cy);
++            for (int16_t px = 0; px < cell; px += 2) {
++                drawPixel(x + px, y + 1, BLACK);
++                drawPixel(x + px, y + cell - 1, BLACK);
++            }
++            for (int16_t py = 0; py < cell; py += 2) {
++                drawPixel(x + 1, y + py, BLACK);
++                drawPixel(x + cell - 1, y + py, BLACK);
++            }
++        }
++
++        // Active piece: solid with white center dot
++        for (uint8_t i = 0; i < 4; i++) {
++            int8_t cx, cy;
++            rotatedCell(curType, curRot, i, cx, cy);
++            int16_t x = blockX(curX + cx), y = blockY(curY + cy);
++            fillRect(x + 1, y + 1, cell - 1, cell - 1, BLACK);
++            drawPixel(x + 1, y + 1, WHITE);
++            if (cell >= 5)
++                drawPixel(x + cell / 2, y + cell / 2, WHITE);
++        }
++    }
++
++    // HUD. Portrait: compact strip under the well. Landscape: column to the right of the well.
++    if (portrait) {
++        const int16_t hudT = wellT + wellH + 3;
++        if (hudT + fontSmall.lineHeight() <= height() - 1) {
++            setFont(fontSmall);
++            const std::string stats = "Sc " + to_string(score) + "  Lv " + to_string(level) + "  Ln " + to_string(lines);
++            printAt(wellL, hudT, stats, LEFT, TOP);
++
++            // Next-piece preview, right-aligned in the strip
++            const int16_t pcell = 4;
++            const int16_t boxW = 4 * pcell + 3;
++            const int16_t bx = width() - boxW - 2;
++            const int16_t by = hudT - 1;
++            drawRect(bx, by, boxW, boxW + 1, BLACK);
++            for (uint8_t i = 0; i < 4; i++) {
++                int8_t cx, cy;
++                rotatedCell(nextType, 0, i, cx, cy);
++                fillRect(bx + 1 + cx * pcell, by + 1 + cy * pcell, pcell - 1, pcell - 1, BLACK);
++                drawPixel(bx + 1 + cx * pcell, by + 1 + cy * pcell, WHITE);
++            }
++
++            const int16_t cy2 = hudT + fontSmall.lineHeight() + 3;
++            if (cy2 + fontSmall.lineHeight() <= height() - 1) {
++                std::string hint = "Tap: pause  Btn: quit";
++                if (getTextWidth(hint) > wellW)
++                    hint = "Tap:pause  Btn:quit";
++                printAt(wellL, cy2, hint, LEFT, TOP);
++            }
++        }
++    } else {
++        const int16_t hudL = wellL + wellW + 6;
++        const bool hudFits = (hudL < (int16_t)(width() - fontMedium.lineHeight() * 4));
++        if (hudFits) {
++            int16_t y = wellT;
++            setFont(fontSmall);
++            printAt(hudL, y, "Score", LEFT, TOP);
++            y += fontSmall.lineHeight();
++            setFont(fontMedium);
++            printAt(hudL, y, to_string(score), LEFT, TOP);
++            setFont(fontSmall);
++            y += fontMedium.lineHeight() + 2;
++            printAt(hudL, y, "Lvl ", LEFT, TOP);
++            printAt(hudL + getTextWidth("Lvl "), y, to_string(level), LEFT, TOP);
++            y += fontSmall.lineHeight();
++            printAt(hudL, y, "Lines ", LEFT, TOP);
++            printAt(hudL + getTextWidth("Lines "), y, to_string(lines), LEFT, TOP);
++
++            y += fontSmall.lineHeight() + 3;
++            printAt(hudL, y, "Next", LEFT, TOP);
++
++            // Next-piece preview
++            y += fontSmall.lineHeight();
++            const int16_t pcx = hudL + 1, pcy = y + 1;
++            const uint8_t pcell = 4;
++            drawRect(pcx - 1, pcy - 1, 4 * pcell + 3, 4 * pcell + 3, BLACK);
++            for (uint8_t i = 0; i < 4; i++) {
++                int8_t cx, cy;
++                rotatedCell(nextType, 0, i, cx, cy);
++                fillRect(pcx + cx * pcell + 1, pcy + cy * pcell + 1, pcell - 1, pcell - 1, BLACK);
++                drawPixel(pcx + cx * pcell + 1, pcy + cy * pcell + 1, WHITE);
++            }
++
++            // Controls hint, in whatever slack remains below the preview
++            y += 4 * pcell + 5;
++            if (y + fontSmall.lineHeight() < height() - 2)
++                printAt(hudL, y, "Tap: pause", LEFT, TOP);
++            y += fontSmall.lineHeight();
++            if (y + fontSmall.lineHeight() < height() - 2)
++                printAt(hudL, y, "Btn: quit", LEFT, TOP);
++        }
++    }
++
++    // Overlays
++    if (paused && !gameOver) {
++        setFont(fontMedium);
++        const char *title = awaitingStart ? "READY" : "PAUSED";
++        const int16_t bw = std::min((int16_t)(width() - 4), std::max((int16_t)100, (int16_t)(getTextWidth(title) + 16)));
++        const int16_t extra = awaitingStart ? fontSmall.lineHeight() + 6 : 0;
++        const int16_t bh = fontMedium.lineHeight() + 14 + extra;
++        const int16_t bx = width() / 2 - bw / 2;
++        const int16_t by = height() / 2 - bh / 2;
++        fillRect(bx, by, bw, bh, WHITE);
++        drawRect(bx, by, bw - 1, bh - 1, BLACK);
++        if (awaitingStart) {
++            printAt(width() / 2, by + (bh - extra) / 2, title, CENTER, MIDDLE);
++            setFont(fontSmall);
++            printAt(width() / 2, by + bh - fontSmall.lineHeight() - 4, "Click: start", CENTER, TOP);
++        } else {
++            printAt(width() / 2, by + bh / 2, title, CENTER, MIDDLE);
++        }
++    } else if (gameOver) {
++        setFont(fontMedium);
++        const int16_t bw = std::min((int16_t)(width() - 4),
++                                    std::max((int16_t)130, (int16_t)(getTextWidth("GAME OVER") + 16)));
++        const int16_t bh = fontMedium.lineHeight() + fontSmall.lineHeight() + 18;
++        const int16_t bx = width() / 2 - bw / 2;
++        const int16_t by = height() / 2 - bh / 2;
++        fillRect(bx, by, bw, bh, WHITE);
++        drawRect(bx, by, bw - 1, bh - 1, BLACK);
++        printAt(width() / 2, by + bh / 2 - fontSmall.lineHeight() / 2, "GAME OVER", CENTER, MIDDLE);
++        setFont(fontSmall);
++        printAt(width() / 2, by + bh - fontSmall.lineHeight() - 4, "Tap: new game", CENTER, TOP);
++    }
++}
++
++#endif
+diff --git a/src/graphics/niche/InkHUD/Applets/User/Tetris/TetrisApplet.h b/src/graphics/niche/InkHUD/Applets/User/Tetris/TetrisApplet.h
+new file mode 100644
+index 000000000..8665bbf07
+--- /dev/null
++++ b/src/graphics/niche/InkHUD/Applets/User/Tetris/TetrisApplet.h
+@@ -0,0 +1,84 @@
++#ifdef MESHTASTIC_INCLUDE_INKHUD
++
++/*
++
++Tetris, for InkHUD.
++
++Board, next-piece preview, score / level / lines, ghost piece, pause.
++Joystick: left/right move, up rotate, down soft drop, center tap pause (or restart after game over).
++The D13 user button leaves the game (cycles to the next applet); the board state is kept.
++Menu access (joystick-center long press) is intentionally left un-subscribed so settings stay reachable.
++Sound comes from the buzz library and follows the device's buzzer mode (set it to DISABLED to go silent).
++
++*/
++
++#pragma once
++
++#include "configuration.h"
++
++#include "graphics/niche/InkHUD/Applet.h"
++#include "concurrency/OSThread.h"
++
++namespace NicheGraphics::InkHUD
++{
++
++class TetrisApplet : public Applet, public concurrency::OSThread
++{
++  public:
++    TetrisApplet() : concurrency::OSThread("TetrisApplet") {}
++
++    void onRender(bool full) override;
++    void onActivate() override;
++    void onDeactivate() override;
++    void onForeground() override;
++    void onBackground() override;
++    void onShutdown() override;
++
++    void onNavUp() override;
++    void onNavDown() override;
++    void onNavLeft() override;
++    void onNavRight() override;
++    void onButtonShortPress() override;
++
++    int32_t runOnce() override;
++
++  private:
++    static constexpr uint8_t boardCols = 10;
++    static constexpr uint8_t MAX_ROWS = 20; // Grid array height; live row count fits the screen
++
++    uint8_t grid[MAX_ROWS][boardCols] = {};
++    uint8_t rows = 16; // Live playfield height, sized to the tile by configureBoard()
++    uint8_t curType = 0; // Piece index, 0-6
++    uint8_t curRot = 0;  // Rotation, 0-3
++    int8_t curX = 0;     // Piece origin (cell coords)
++    int8_t curY = 0;
++    uint8_t nextType = 0;
++
++    uint32_t score = 0;
++    uint16_t lines = 0;
++    uint8_t level = 0;
++    bool paused = false;
++    bool awaitingStart = true; // Foreground entry parks the game until the user starts it
++    bool gameOver = false;
++    bool booted = false; // First spawn pending
++
++    uint8_t pickPiece();
++    bool fits(uint8_t type, uint8_t rot, int8_t px, int8_t py);
++    void lockPiece();
++    void clearLines();
++    void spawn();
++    void stepDown(bool soft);
++    void hardDropInfo(int8_t *ghostY);
++    void resetGame();
++    uint32_t gravityIntervalMs();
++    void configureBoard(); // Pick live rows + cell size so the well fills the tile
++
++    // Geometry, computed each render
++    uint8_t cell = 6;
++    int16_t wellL = 0; // Well left edge (pixels)
++    int16_t wellT = 0; // Well top edge
++};
++
++} // namespace NicheGraphics::InkHUD
++
++#endif
+diff --git a/src/graphics/niche/InkHUD/Applets/User/ThreadedMessage/ThreadedMessageApplet.cpp b/src/graphics/niche/InkHUD/Applets/User/ThreadedMessage/ThreadedMessageApplet.cpp
+index a0e9e201a..85ebd0278 100644
+--- a/src/graphics/niche/InkHUD/Applets/User/ThreadedMessage/ThreadedMessageApplet.cpp
++++ b/src/graphics/niche/InkHUD/Applets/User/ThreadedMessage/ThreadedMessageApplet.cpp
+@@ -10,6 +10,38 @@ using namespace NicheGraphics;
+ InkHUD::ThreadedMessageApplet::ThreadedMessageApplet(uint8_t channelIndex)
+     : SinglePortModule("ThreadedMessageApplet", meshtastic_PortNum_TEXT_MESSAGE_APP), channelIndex(channelIndex)
+ {
++    // Joystick up/down scroll the thread; left/right still cycle applets
++    setInputsSubscribed(NAV_UP | NAV_DOWN, true);
++}
++
++void InkHUD::ThreadedMessageApplet::onNavUp()
++{
++    // Clamp to this channel's own message count: scrolling must stop at the oldest
++    // message, never run past it into an empty screen (the store spans all channels/DMs).
++    int channelCount = 0;
++    for (const auto &m : messageStore.getLiveMessages())
++        if (m.type == MessageType::BROADCAST && m.channelIndex == channelIndex)
++            channelCount++;
++
++    const int maxScroll = channelCount - 1; // Keep at least the oldest message visible
++    if ((int)scrollOffset < maxScroll) {
++        scrollOffset++;
++        requestUpdate();
++    }
++}
++
++void InkHUD::ThreadedMessageApplet::onNavDown()
++{
++    if (scrollOffset > 0) {
++        scrollOffset--;
++        requestUpdate();
++    }
++}
++
++void InkHUD::ThreadedMessageApplet::onForeground()
++{
++    Applet::onForeground();
++    scrollOffset = 0;
+ }
+ 
+ void InkHUD::ThreadedMessageApplet::onRender(bool full)
+@@ -50,12 +82,17 @@ void InkHUD::ThreadedMessageApplet::onRender(bool full)
+     const int16_t msgR = (width() - 1) - padW;
+     const uint16_t msgW = (msgR - msgL) + 1;
+ 
+-    int16_t msgB = height() - 1; // Vertical cursor for drawing. Messages are bottom-aligned to this value.
++    // Reserve a small bottom gutter: the newest message sits flush here, and Cyrillic
++    // descenders (р, ц, д...) would otherwise touch/exceed the tile's last row
++    int16_t msgB = height() - 3; // Vertical cursor for drawing. Messages are bottom-aligned to this value.
+ 
+     // Iterate the global store newest-first, showing only broadcast messages on our channel
+     const auto &allMessages = messageStore.getLiveMessages();
+     int msgIdx = (int)allMessages.size() - 1;
+ 
++    // Scrolling hides the N most-recent messages of this channel, revealing older ones
++    uint16_t seen = 0; // This-channel messages encountered so far (newest-first)
++
+     while (msgB >= (0 - fontSmall.lineHeight()) && msgIdx >= 0) {
+ 
+         const StoredMessage &m = allMessages.at(msgIdx);
+@@ -66,6 +103,14 @@ void InkHUD::ThreadedMessageApplet::onRender(bool full)
+             continue;
+         }
+ 
++        // Skip recent messages hidden by scroll (drawn cursor is unaffected; they're simply not shown)
++        if (seen < scrollOffset) {
++            seen++;
++            msgIdx--;
++            continue;
++        }
++        seen++;
++
+         // Grab data for message
+         bool outgoing = (m.sender == myNodeInfo.my_node_num);
+         std::string bodyText = parse(std::string(MessageStore::getText(m))); // Parse any non-ascii chars
+diff --git a/src/graphics/niche/InkHUD/Applets/User/ThreadedMessage/ThreadedMessageApplet.h b/src/graphics/niche/InkHUD/Applets/User/ThreadedMessage/ThreadedMessageApplet.h
+index df1a345d2..bf13ff734 100644
+--- a/src/graphics/niche/InkHUD/Applets/User/ThreadedMessage/ThreadedMessageApplet.h
++++ b/src/graphics/niche/InkHUD/Applets/User/ThreadedMessage/ThreadedMessageApplet.h
+@@ -38,6 +38,10 @@ class ThreadedMessageApplet : public Applet, public SinglePortModule
+ 
+     void onRender(bool full) override;
+ 
++    void onNavUp() override;   // Scroll toward older messages
++    void onNavDown() override; // Scroll toward newest messages
++    void onForeground() override;
++
+     void onActivate() override;
+     void onDeactivate() override;
+     void onShutdown() override;
+@@ -48,6 +52,8 @@ class ThreadedMessageApplet : public Applet, public SinglePortModule
+   protected:
+     void loadMessagesFromFlash();
+ 
++    uint16_t scrollOffset = 0; // Number of most-recent messages hidden to reveal older ones
++
+     uint8_t channelIndex = 0;
+ };
+ 
+diff --git a/src/graphics/niche/InkHUD/Events.cpp b/src/graphics/niche/InkHUD/Events.cpp
+index 54d061fa9..9c909a795 100644
+--- a/src/graphics/niche/InkHUD/Events.cpp
++++ b/src/graphics/niche/InkHUD/Events.cpp
+@@ -313,7 +313,9 @@ void InkHUD::Events::onTouchNavLeft()
+         }
+     }
+ 
+-    // If no system applet is handling input, default behavior instead is to cycle applets
++    // System applets (menu) get first refusal; otherwise only applets which explicitly
++    // subscribe to NAV_LEFT receive it. The old default of cycling applets is removed:
++    // applet switching now lives on the user button (auxAppletSwitch) only.
+     if (consumer)
+         consumer->onNavLeft();
+     else if (!dismissedExt) { // Don't change applet if this button press silenced the external notification module
+@@ -321,8 +323,6 @@ void InkHUD::Events::onTouchNavLeft()
+ 
+         if (userConsumer != nullptr && userConsumer->isInputSubscribed(Applet::NAV_LEFT))
+             userConsumer->onNavLeft();
+-        else
+-            inkhud->prevApplet();
+     }
+ }
+ 
+@@ -346,7 +346,7 @@ void InkHUD::Events::onTouchNavRight()
+         }
+     }
+ 
+-    // If no system applet is handling input, default behavior instead is to cycle applets
++    // Symmetric with onTouchNavLeft: no default applet cycling any more.
+     if (consumer)
+         consumer->onNavRight();
+     else if (!dismissedExt) { // Don't change applet if this button press silenced the external notification module
+@@ -354,8 +354,6 @@ void InkHUD::Events::onTouchNavRight()
+ 
+         if (userConsumer != nullptr && userConsumer->isInputSubscribed(Applet::NAV_RIGHT))
+             userConsumer->onNavRight();
+-        else
+-            inkhud->nextApplet();
+     }
+ }
+ 
+diff --git a/src/graphics/niche/InkHUD/InkHUD.cpp b/src/graphics/niche/InkHUD/InkHUD.cpp
+index fe5a32855..a40f58711 100644
+--- a/src/graphics/niche/InkHUD/InkHUD.cpp
++++ b/src/graphics/niche/InkHUD/InkHUD.cpp
+@@ -11,7 +11,9 @@
+ #include "./WindowManager.h"
+ #include "FSCommon.h"
+ #include "MessageStore.h"
++#include "PowerFSM.h"
+ #include "SPILock.h"
++#include "buzz.h"
+ #include "concurrency/LockGuard.h"
+ 
+ using namespace NicheGraphics;
+@@ -363,6 +365,30 @@ void InkHUD::InkHUD::nextApplet()
+     windowManager->nextApplet();
+ }
+ 
++// Aux (physical user) button: if a system applet currently owns input (menu, keyboard),
++// let it dismiss; if the active applet wants the click (e.g. Tetris pause), give it that;
++// otherwise cycle to the next applet.
++void InkHUD::InkHUD::auxAppletSwitch()
++{
++    // D13 "user button": dismiss an open system UI (menu/keyboard), otherwise leave the
++    // current applet. A foreground applet's BUTTON_SHORT (e.g. Tetris pause) is intentionally
++    // NOT routed here - it stays on the joystick-center press (shortpress()), so the user
++    // button always doubles as an "exit / next applet" control.
++
++    // Match the audio/power side effects every other Events.cpp handler plays.
++    playChirp();
++    powerFSM.trigger(EVENT_INPUT);
++
++    for (SystemApplet *sa : systemApplets) {
++        if (sa->handleInput) {
++            sa->onExitShort();
++            return;
++        }
++    }
++
++    nextApplet();
++}
++
+ // Cycle the previous user applet to the foreground
+ // Only activated applets are cycled
+ // If user has a multi-applet layout, the applets will cycle on the "focused tile"
+diff --git a/src/graphics/niche/InkHUD/InkHUD.h b/src/graphics/niche/InkHUD/InkHUD.h
+index 538896792..88d9380e8 100644
+--- a/src/graphics/niche/InkHUD/InkHUD.h
++++ b/src/graphics/niche/InkHUD/InkHUD.h
+@@ -85,6 +85,7 @@ class InkHUD
+ 
+     void nextApplet();
+     void prevApplet();
++    void auxAppletSwitch(); // Dismiss any open system UI (menu/keyboard), otherwise cycle applets
+     NicheGraphics::InkHUD::Applet *getActiveApplet();
+     void openMenu();
+     void openAppSwitcher();
+diff --git a/variants/nrf52840/seeed_wio_tracker_L1/variant.h b/variants/nrf52840/seeed_wio_tracker_L1/variant.h
+index aeaa8f44a..2f1fe4b98 100644
+--- a/variants/nrf52840/seeed_wio_tracker_L1/variant.h
++++ b/variants/nrf52840/seeed_wio_tracker_L1/variant.h
+@@ -162,10 +162,10 @@ static const uint8_t SCL = PIN_WIRE_SCL;
+ 
+ // trackball
+ #define HAS_TRACKBALL 1
+-#define TB_UP 25
+-#define TB_DOWN 26
+-#define TB_LEFT 27
+-#define TB_RIGHT 28
++#define TB_UP 27
++#define TB_DOWN 28
++#define TB_LEFT 26
++#define TB_RIGHT 25
+ #define TB_PRESS 29
+ #define TB_DIRECTION FALLING
+ // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+diff --git a/variants/nrf52840/seeed_wio_tracker_L1_eink/nicheGraphics.h b/variants/nrf52840/seeed_wio_tracker_L1_eink/nicheGraphics.h
+index ea74bbcf3..c85895e30 100644
+--- a/variants/nrf52840/seeed_wio_tracker_L1_eink/nicheGraphics.h
++++ b/variants/nrf52840/seeed_wio_tracker_L1_eink/nicheGraphics.h
+@@ -12,11 +12,12 @@
+ #include "graphics/niche/InkHUD/Applets/Examples/UserAppletInputExample/UserAppletInputExample.h"
+ #include "graphics/niche/InkHUD/Applets/User/AllMessage/AllMessageApplet.h"
+ #include "graphics/niche/InkHUD/Applets/User/DM/DMApplet.h"
+-#include "graphics/niche/InkHUD/Applets/User/FavoritesMap/FavoritesMapApplet.h"
++// #include "graphics/niche/InkHUD/Applets/User/FavoritesMap/FavoritesMapApplet.h" // map disabled for now
+ #include "graphics/niche/InkHUD/Applets/User/Heard/HeardApplet.h"
+ #include "graphics/niche/InkHUD/Applets/User/Positions/PositionsApplet.h"
+ #include "graphics/niche/InkHUD/Applets/User/RecentsList/RecentsListApplet.h"
+ #include "graphics/niche/InkHUD/Applets/User/ThreadedMessage/ThreadedMessageApplet.h"
++#include "graphics/niche/InkHUD/Applets/User/Tetris/TetrisApplet.h"
+ #include "graphics/niche/InkHUD/Applets/User/Waypoints/WaypointListApplet.h"
+ 
+ // Shared NicheGraphics components
+@@ -52,9 +53,9 @@ void setupNicheGraphics()
+     inkhud->setDisplayResilience(15);
+ 
+     // Select fonts
+-    InkHUD::Applet::fontLarge = FREESANS_12PT;
+-    InkHUD::Applet::fontMedium = FREESANS_9PT;
+-    InkHUD::Applet::fontSmall = FREESANS_6PT;
++    InkHUD::Applet::fontLarge = FREESANS_12PT_WIN1251;
++    InkHUD::Applet::fontMedium = FREESANS_9PT_WIN1251;
++    InkHUD::Applet::fontSmall = FREESANS_6PT_WIN1251;
+ 
+     // Customize default settings
+     inkhud->persistence->settings.rotation = 1; // 90 degrees clockwise
+@@ -79,7 +80,9 @@ void setupNicheGraphics()
+     inkhud->addApplet("Recents List", new InkHUD::RecentsListApplet);            // -
+     inkhud->addApplet("Heard", new InkHUD::HeardApplet, true, false, 0);         // Activated, no autoshow, default on tile 0
+ 
+-    inkhud->addApplet("Favorites Map", new InkHUD::FavoritesMapApplet, false, false); // -
++    // Map applet disabled: QSPI tile storage proved unstable; revisit later.
++    // inkhud->addApplet("Favorites Map", new InkHUD::FavoritesMapApplet, false, false);
++    inkhud->addApplet("Tetris", new InkHUD::TetrisApplet);                             // - (enable via menu: Applets)
+     //  Start running InkHUD
+     inkhud->begin();
+ 
+@@ -89,13 +92,13 @@ void setupNicheGraphics()
+     Inputs::TwoButtonExtended *buttons = Inputs::TwoButtonExtended::getInstance(); // Shared NicheGraphics component
+ 
+ #if HAS_TRACKBALL
+-    // #0: Exit Button
++    // #0: User Button — short press cycles applets (or dismisses an open menu/keyboard), long press opens the menu
+     buttons->setWiring(0, Inputs::TwoButtonExtended::getUserButtonPin());
+     buttons->setTiming(0, 75, 500);
+-    buttons->setHandlerShortPress(0, [inkhud]() { inkhud->exitShort(); });
+-    buttons->setHandlerLongPress(0, [inkhud]() { inkhud->exitLong(); });
++    buttons->setHandlerShortPress(0, [inkhud]() { inkhud->auxAppletSwitch(); });
++    buttons->setHandlerLongPress(0, [inkhud]() { inkhud->longpress(); });
+ 
+-    // #1: Joystick Center
++    // #1: Joystick Center — confirm/select; short press opens the menu
+     buttons->setWiring(1, TB_PRESS);
+     buttons->setTiming(1, 75, 500);
+     buttons->setHandlerShortPress(1, [inkhud]() { inkhud->shortpress(); });
+diff --git a/variants/nrf52840/seeed_wio_tracker_L1_eink/platformio.ini b/variants/nrf52840/seeed_wio_tracker_L1_eink/platformio.ini
+index 587349602..ab10de663 100644
+--- a/variants/nrf52840/seeed_wio_tracker_L1_eink/platformio.ini
++++ b/variants/nrf52840/seeed_wio_tracker_L1_eink/platformio.ini
+@@ -44,6 +44,7 @@ board = seeed_wio_tracker_L1
+ extends = env:seeed_wio_tracker_L1_eink, inkhud
+ board_level = release
+ build_flags = 
++  -D OLED_RU
+   ${env:seeed_wio_tracker_L1_eink.build_flags}
+   ${inkhud.build_flags}
+   -D BUTTON_PIN=D13
+diff --git a/variants/nrf52840/seeed_wio_tracker_L1_eink/variant.h b/variants/nrf52840/seeed_wio_tracker_L1_eink/variant.h
+index 9dd92a5f5..74ae6d70d 100644
+--- a/variants/nrf52840/seeed_wio_tracker_L1_eink/variant.h
++++ b/variants/nrf52840/seeed_wio_tracker_L1_eink/variant.h
+@@ -168,10 +168,12 @@ static const uint8_t SCL = PIN_WIRE_SCL;
+ 
+ // trackball
+ #define HAS_TRACKBALL 1
+-#define TB_UP 25
+-#define TB_DOWN 26
+-#define TB_LEFT 27
+-#define TB_RIGHT 28
++// NOTE: upstream 25/26/27/28 does not match this board's joystick wiring;
++// these are the corrected Dx values (see variant.cpp D25..D29 = TB_*).
++#define TB_UP 27
++#define TB_DOWN 28
++#define TB_LEFT 26
++#define TB_RIGHT 25
+ #define TB_PRESS 29
+ #define TB_DIRECTION FALLING
+ 
+-- 
+2.53.0
+

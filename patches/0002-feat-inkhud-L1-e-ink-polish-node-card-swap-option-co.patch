@@ -1,0 +1,799 @@
+From a5606a15490b76ddb4dd070d454736b93a4a491e Mon Sep 17 00:00:00 2001
+From: Denis Zolotarev <judaeus@gmail.com>
+Date: Mon, 23 Nov 2026 18:27:43 +0200
+Subject: [PATCH 2/3] =?UTF-8?q?feat(inkhud):=20L1=20e-ink=20polish=20?=
+ =?UTF-8?q?=E2=80=94=20node-card=20swap=20option=20+=20compact=20spacing,?=
+ =?UTF-8?q?=20lowercase=20joined=20hops,=20emoji=20handling=20(substitutio?=
+ =?UTF-8?q?n=20table=20for=20bodies,=20cleanNodeName=20for=20names),=20joy?=
+ =?UTF-8?q?stick=20hold-repeat=20800/800,=20Tetris=20tweaks=20(bigger=20Ne?=
+ =?UTF-8?q?xt=20preview,=20trimmed=20hint,=20start-park);=20settings=20v5?=
+ =?UTF-8?q?=20with=20reserve=20bytes?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ src/graphics/niche/InkHUD/Applet.cpp          |  20 +-
+ src/graphics/niche/InkHUD/Applet.h            |   2 +
+ .../Applets/Bases/NodeList/NodeListApplet.cpp |  54 +++--
+ .../Applets/Bases/NodeList/NodeListApplet.h   |   2 +-
+ .../InkHUD/Applets/System/Menu/MenuAction.h   |   3 +
+ .../InkHUD/Applets/System/Menu/MenuApplet.cpp |  30 ++-
+ .../User/AllMessage/AllMessageApplet.cpp      |  18 +-
+ .../niche/InkHUD/Applets/User/DM/DMApplet.cpp |  18 +-
+ .../Applets/User/Tetris/TetrisApplet.cpp      |  14 +-
+ src/graphics/niche/InkHUD/EmojiSubs.cpp       | 221 ++++++++++++++++++
+ src/graphics/niche/InkHUD/EmojiSubs.h         |  26 +++
+ src/graphics/niche/InkHUD/Persistence.h       |  11 +-
+ .../niche/Inputs/TwoButtonExtended.cpp        |  23 +-
+ src/graphics/niche/Inputs/TwoButtonExtended.h |  11 +
+ .../seeed_wio_tracker_L1_eink/nicheGraphics.h |   1 +
+ 15 files changed, 406 insertions(+), 48 deletions(-)
+ create mode 100644 src/graphics/niche/InkHUD/EmojiSubs.cpp
+ create mode 100644 src/graphics/niche/InkHUD/EmojiSubs.h
+
+diff --git a/src/graphics/niche/InkHUD/Applet.cpp b/src/graphics/niche/InkHUD/Applet.cpp
+index 03fdd0ea4..7480b3c05 100644
+--- a/src/graphics/niche/InkHUD/Applet.cpp
++++ b/src/graphics/niche/InkHUD/Applet.cpp
+@@ -4,6 +4,8 @@
+ 
+ #include "./Applet.h"
+ 
++#include "./EmojiSubs.h"
++
+ #include "main.h"
+ 
+ #include "gps/RTC.h"
+@@ -329,7 +331,7 @@ void InkHUD::Applet::printAt(int16_t x, int16_t y, const char *text, HorizontalA
+ // Print text, specifying the position of any edge / corner of the textbox
+ void InkHUD::Applet::printAt(int16_t x, int16_t y, const std::string &text, HorizontalAlignment ha, VerticalAlignment va)
+ {
+-    printAt(x, y, text.c_str(), ha, va);
++    printAt(x, y, EmojiSubs::apply(text).c_str(), ha, va);
+ }
+ 
+ // Set which font should be used for subsequent drawing
+@@ -361,10 +363,13 @@ std::string InkHUD::Applet::parseShortName(meshtastic_NodeInfoLite *node)
+ {
+     assert(node);
+ 
+-    // Use the true shortname if known, and doesn't contain any unprintable characters (emoji, etc.)
++    // Use the true shortname if known, after dropping emoji and trimming spaces
+     if (nodeInfoLiteHasUser(node)) {
+-        std::string parsed = parse(node->short_name);
+-        if (isPrintable(parsed))
++        std::string cleaned = EmojiSubs::cleanNodeName(node->short_name);
++        if (cleaned.empty() && node->short_name[0] == '\0')
++            return cleaned; // genuinely empty shortname: let callers handle it (as before)
++        std::string parsed = parse(cleaned);
++        if (!cleaned.empty() && isPrintable(parsed))
+             return parsed;
+     }
+ 
+@@ -448,8 +453,13 @@ std::string InkHUD::Applet::hexifyNodeNum(NodeNum num)
+ }
+ 
+ // Print text, with word wrapping
+-// Avoids splitting words in half, instead moving the entire word to a new line wherever possible
++// Emoji codepoints are substituted with short ascii text first (settings-gated, no-op otherwise)
+ void InkHUD::Applet::printWrapped(int16_t left, int16_t top, uint16_t width, const std::string &text)
++{
++    printWrappedRaw(left, top, width, EmojiSubs::apply(text));
++}
++
++void InkHUD::Applet::printWrappedRaw(int16_t left, int16_t top, uint16_t width, const std::string &text)
+ {
+     // Place the AdafruitGFX cursor to suit our "top" coord
+     setCursor(left, top + getFont().heightAboveCursor());
+diff --git a/src/graphics/niche/InkHUD/Applet.h b/src/graphics/niche/InkHUD/Applet.h
+index 0f4803958..e3542cf94 100644
+--- a/src/graphics/niche/InkHUD/Applet.h
++++ b/src/graphics/niche/InkHUD/Applet.h
+@@ -168,6 +168,8 @@ class Applet : public GFX
+     void printThick(int16_t xCenter, int16_t yCenter, const std::string &text, uint8_t thicknessX,
+                     uint8_t thicknessY);                                                   // Faux bold
+     void printWrapped(int16_t left, int16_t top, uint16_t width, const std::string &text); // Per-word line wrapping
++    void printWrappedRaw(int16_t left, int16_t top, uint16_t width,
++                         const std::string &text); // Same, without emoji substitution (use via printWrapped)
+ 
+     void hatchRegion(int16_t x, int16_t y, uint16_t w, uint16_t h, uint8_t spacing, Color color); // Fill with sparse lines
+     void drawHeader(const std::string &text); // Draw the standard applet header
+diff --git a/src/graphics/niche/InkHUD/Applets/Bases/NodeList/NodeListApplet.cpp b/src/graphics/niche/InkHUD/Applets/Bases/NodeList/NodeListApplet.cpp
+index 1b75a21dd..2f7eb6797 100644
+--- a/src/graphics/niche/InkHUD/Applets/Bases/NodeList/NodeListApplet.cpp
++++ b/src/graphics/niche/InkHUD/Applets/Bases/NodeList/NodeListApplet.cpp
+@@ -6,6 +6,7 @@
+ #include "NodeDB.h"
+ 
+ #include "./NodeListApplet.h"
++#include "graphics/niche/InkHUD/EmojiSubs.h"
+ 
+ using namespace NicheGraphics;
+ 
+@@ -213,19 +214,18 @@ void InkHUD::NodeListApplet::onRender(bool full)
+ 
+         // -- Shortname --
+         // Parse special chars in the short name
+-        // Use "?" if unknown
++        // Use "?" if unknown or empty (nodes can publish empty user packets)
+         if (node)
+             shortName = parseShortName(node);
+         else
+             shortName = "?";
++        if (shortName.empty())
++            shortName = "?";
+ 
+-        // -- Longname --
+-        // Parse special chars in long name
+-        // Use node id if unknown
+         if (nodeInfoLiteHasUser(node))
+-            longName = parse(node->long_name); // Found in nodeDB
+-        else {
+-            // Not found in nodeDB, show a hex nodeid instead
++            longName = parse(EmojiSubs::cleanNodeName(node->long_name)); // drop emoji, trim spaces
++        if (longName.empty()) {
++            // No usable text (user unknown, name empty, or pure-unknown-emoji): show hex nodeid
+             longName = hexifyNodeNum(nodeNum);
+         }
+ 
+@@ -238,20 +238,23 @@ void InkHUD::NodeListApplet::onRender(bool full)
+ 
+         // Define two lines of text for the card
+         // We will center our text on these lines
+-        uint16_t lineAY = cardTopY + (fontMedium.lineHeight() / 2);
+-        uint16_t lineBY = cardTopY + fontMedium.lineHeight() + (fontSmall.lineHeight() / 2);
++        // The 2px top pad + cardMarginH(4) split the air evenly around the separator line
++        uint16_t lineAY = cardTopY + 2 + (fontMedium.lineHeight() / 2);
++        uint16_t lineBY = cardTopY + 2 + fontMedium.lineHeight() + (fontSmall.lineHeight() / 2);
+ 
+-        // Print the short name
+-        setFont(fontMedium);
+-        printAt(0, lineAY, shortName, LEFT, MIDDLE);
++        // Which name is the bold title is a setting (Options > Long Names First)
++        const bool longFirst = inkhud->persistence->settings.optionalFeatures.longNamesFirst;
++        const std::string &titleText = longFirst ? longName : shortName;
++        const std::string &subText = longFirst ? shortName : longName;
+ 
+-        // Right-side labels and long name are rendered in small font.
++        // Right-side small labels
+         setFont(fontSmall);
+         uint16_t rightContentW = 0;
++        uint16_t distanceW = 0;
+ 
+         // Bottom row right: distance.
+         if (!distance.empty()) {
+-            rightContentW = std::max(rightContentW, getTextWidth(distance));
++            distanceW = std::max(distanceW, getTextWidth(distance));
+             printAt(width() - 1, lineBY, distance, RIGHT, MIDDLE);
+         }
+ 
+@@ -264,20 +267,27 @@ void InkHUD::NodeListApplet::onRender(bool full)
+             rightContentW = std::max(rightContentW, signalW);
+             drawSignalIndicator(signalX, signalY, signalW, signalH, signal);
+         } else if (hopsAway != CardInfo::HOPS_UNKNOWN) {
+-            std::string hopString = to_string(hopsAway) + (hopsAway == 1 ? " Hop" : " Hops");
++            std::string hopString = to_string(hopsAway) + (hopsAway == 1 ? "hop" : "hops");
+             rightContentW = std::max(rightContentW, getTextWidth(hopString));
+             printAt(width() - 1, lineAY, hopString, RIGHT, MIDDLE);
+         }
+ 
+-        // Give long names as much room as possible while still avoiding right side signal and hop space
+-        const uint16_t longNameMaxW =
+-            (rightContentW + rightContentGap < width()) ? (width() - rightContentW - rightContentGap) : 0;
+-        const std::string longNameShown = ellipsizeToWidth(longName, longNameMaxW);
++        // Title row, in the bold font: short or long name, per setting
++        setFont(fontMedium);
++        const uint16_t titleMaxW = (rightContentW + rightContentGap < width()) ? (width() - rightContentW - rightContentGap) : 0;
++        const std::string titleShown = ellipsizeToWidth(titleText, titleMaxW);
+ 
+-        // Safety crop
+-        setCrop(0, cardTopY, longNameMaxW, cardH);
+-        printAt(0, lineBY, longNameShown, LEFT, MIDDLE);
++        setCrop(0, cardTopY, titleMaxW, cardH);
++        printAt(0, lineAY, titleShown, LEFT, MIDDLE);
++        resetCrop();
++
++        // Sub row, in the small font: the other name, keeping room for the distance label
++        setFont(fontSmall);
++        const uint16_t subMaxW = (distanceW + rightContentGap < width()) ? (width() - distanceW - rightContentGap) : 0;
++        const std::string subShown = ellipsizeToWidth(subText, subMaxW);
+ 
++        setCrop(0, cardTopY, subMaxW, cardH);
++        printAt(0, lineBY, subShown, LEFT, MIDDLE);
+         resetCrop();
+ 
+         // Draw separator between cards
+diff --git a/src/graphics/niche/InkHUD/Applets/Bases/NodeList/NodeListApplet.h b/src/graphics/niche/InkHUD/Applets/Bases/NodeList/NodeListApplet.h
+index 6ee1aa808..e84bc8422 100644
+--- a/src/graphics/niche/InkHUD/Applets/Bases/NodeList/NodeListApplet.h
++++ b/src/graphics/niche/InkHUD/Applets/Bases/NodeList/NodeListApplet.h
+@@ -69,7 +69,7 @@ class NodeListApplet : public Applet, public MeshModule
+ 
+     // Card Dimensions
+     // - for rendering and for maxCards calc
+-    uint8_t cardMarginH = 1; // Gap between cards (minimal to fit more rows)
++    uint8_t cardMarginH = 4; // Air per card: 2px below the text block, 2px above the next one
+     uint16_t cardH = fontMedium.lineHeight() + fontSmall.lineHeight() + cardMarginH; // Height of card
+ 
+     uint16_t scrollOffset = 0;   // Index of the first card drawn
+diff --git a/src/graphics/niche/InkHUD/Applets/System/Menu/MenuAction.h b/src/graphics/niche/InkHUD/Applets/System/Menu/MenuAction.h
+index b2a5f5ee6..cd9084aa6 100644
+--- a/src/graphics/niche/InkHUD/Applets/System/Menu/MenuAction.h
++++ b/src/graphics/niche/InkHUD/Applets/System/Menu/MenuAction.h
+@@ -42,6 +42,9 @@ enum MenuAction {
+     TOGGLE_NOTIFICATIONS,
+     TOGGLE_INVERT_COLOR,
+     TOGGLE_12H_CLOCK,
++    TOGGLE_EMOJI_TEXT,
++    TOGGLE_STICK_REPEAT,
++    TOGGLE_LONG_NAMES_FIRST,
+     // Regions
+     SET_REGION_US,
+     SET_REGION_EU_868,
+diff --git a/src/graphics/niche/InkHUD/Applets/System/Menu/MenuApplet.cpp b/src/graphics/niche/InkHUD/Applets/System/Menu/MenuApplet.cpp
+index f4e4e048a..5132a9437 100644
+--- a/src/graphics/niche/InkHUD/Applets/System/Menu/MenuApplet.cpp
++++ b/src/graphics/niche/InkHUD/Applets/System/Menu/MenuApplet.cpp
+@@ -17,6 +17,8 @@
+ #endif
+ #include "graphics/niche/InkHUD/Applets/Bases/Map/MapApplet.h"
+ #include "graphics/niche/InkHUD/Applets/User/Waypoints/WaypointListApplet.h"
++#include "graphics/niche/InkHUD/EmojiSubs.h"
++#include "graphics/niche/Inputs/TwoButtonExtended.h"
+ #include "graphics/niche/Utils/FlashData.h"
+ #include "main.h"
+ #include "mesh/generated/meshtastic/deviceonly.pb.h"
+@@ -556,6 +558,25 @@ void InkHUD::MenuApplet::execute(MenuItem item)
+         }
+         break;
+ 
++    case TOGGLE_EMOJI_TEXT:
++        if (item.checkState) {
++            *item.checkState = !(*item.checkState);
++        }
++        break;
++
++    case TOGGLE_LONG_NAMES_FIRST:
++        if (item.checkState) {
++            *item.checkState = !(*item.checkState);
++        }
++        break;
++
++    case TOGGLE_STICK_REPEAT:
++        if (item.checkState) {
++            *item.checkState = !(*item.checkState);
++            NicheGraphics::Inputs::TwoButtonExtended::getInstance()->setJoystickRepeat(*item.checkState);
++        }
++        break;
++
+     case TOGGLE_INVERT_COLOR:
+         if (config.display.displaymode == meshtastic_Config_DisplayConfig_DisplayMode_INVERTED)
+             config.display.displaymode = meshtastic_Config_DisplayConfig_DisplayMode_DEFAULT;
+@@ -1330,6 +1351,13 @@ void InkHUD::MenuApplet::showPage(MenuPage page)
+                                  &settings->optionalFeatures.notifications));
+         items.push_back(MenuItem("Battery Icon", MenuAction::TOGGLE_BATTERY_ICON, MenuPage::OPTIONS,
+                                  &settings->optionalFeatures.batteryIcon));
++        items.push_back(MenuItem("Emoji as Text", MenuAction::TOGGLE_EMOJI_TEXT, MenuPage::OPTIONS,
++                                 &settings->optionalFeatures.emojiText));
++        items.push_back(MenuItem("Swap Names", MenuAction::TOGGLE_LONG_NAMES_FIRST, MenuPage::OPTIONS,
++                                 &settings->optionalFeatures.longNamesFirst));
++        if (settings->joystick.enabled)
++            items.push_back(
++                MenuItem("Stick Repeat", MenuAction::TOGGLE_STICK_REPEAT, MenuPage::OPTIONS, &settings->joystick.repeat));
+         invertedColors = (config.display.displaymode == meshtastic_Config_DisplayConfig_DisplayMode_INVERTED);
+         items.push_back(MenuItem("Invert Color", MenuAction::TOGGLE_INVERT_COLOR, MenuPage::OPTIONS, &invertedColors));
+         items.push_back(MenuItem("Exit", MenuPage::EXIT));
+@@ -2578,7 +2606,7 @@ void InkHUD::MenuApplet::drawInputField(uint16_t left, uint16_t top, uint16_t wi
+     uint16_t wrapMaxH = 0;
+ 
+     // The input buffer holds UTF-8 (keyboard injects UTF-8); re-encode to the font for display
+-    const std::string shown = parse(text);
++    const std::string shown = parse(EmojiSubs::apply(text));
+ 
+     // Draw the text, input box, and cursor
+     // Adjusting the box for screen height
+diff --git a/src/graphics/niche/InkHUD/Applets/User/AllMessage/AllMessageApplet.cpp b/src/graphics/niche/InkHUD/Applets/User/AllMessage/AllMessageApplet.cpp
+index 4150f5f7c..12df0988b 100644
+--- a/src/graphics/niche/InkHUD/Applets/User/AllMessage/AllMessageApplet.cpp
++++ b/src/graphics/niche/InkHUD/Applets/User/AllMessage/AllMessageApplet.cpp
+@@ -2,6 +2,8 @@
+ 
+ #include "./AllMessageApplet.h"
+ 
++#include "graphics/niche/InkHUD/EmojiSubs.h"
++
+ #include "MessageStore.h"
+ 
+ using namespace NicheGraphics;
+@@ -75,14 +77,18 @@ void InkHUD::AllMessageApplet::onRender(bool full)
+     // Sender's id
+     // - short name and long name, if available, or
+     // - node id
++    // Nodes can publish empty names (or only one of them): fall back so the header is never "( )"
+     meshtastic_NodeInfoLite *sender = nodeDB->getMeshNode(message->sender);
+-    if (nodeInfoLiteHasUser(sender)) {
+-        header += parseShortName(sender); // May be last-four of node if unprintable (emoji, etc)
+-        header += " (";
+-        header += parse(sender->long_name);
+-        header += ")";
+-    } else
++    std::string sName = sender ? parseShortName(sender) : ""; // May be last-four of node if unprintable (emoji, etc)
++    std::string lName = (sender && nodeInfoLiteHasUser(sender)) ? parse(EmojiSubs::cleanNodeName(sender->long_name)) : "";
++    if (sName.empty() && lName.empty())
+         header += hexifyNodeNum(message->sender);
++    else if (sName.empty())
++        header += lName;
++    else if (lName.empty())
++        header += sName;
++    else
++        header += sName + " (" + lName + ")";
+ 
+     // Draw a "standard" applet header
+     drawHeader(header);
+diff --git a/src/graphics/niche/InkHUD/Applets/User/DM/DMApplet.cpp b/src/graphics/niche/InkHUD/Applets/User/DM/DMApplet.cpp
+index ed21e9383..8d1bdd05e 100644
+--- a/src/graphics/niche/InkHUD/Applets/User/DM/DMApplet.cpp
++++ b/src/graphics/niche/InkHUD/Applets/User/DM/DMApplet.cpp
+@@ -2,6 +2,8 @@
+ 
+ #include "./DMApplet.h"
+ 
++#include "graphics/niche/InkHUD/EmojiSubs.h"
++
+ #include "MessageStore.h"
+ 
+ using namespace NicheGraphics;
+@@ -71,14 +73,18 @@ void InkHUD::DMApplet::onRender(bool full)
+     // Sender's id
+     // - shortname and long name, if available, or
+     // - node id
++    // Nodes can publish empty names (or only one of them): fall back so the header is never "( )"
+     meshtastic_NodeInfoLite *sender = nodeDB->getMeshNode(latestMessage->dm.sender);
+-    if (nodeInfoLiteHasUser(sender)) {
+-        header += parseShortName(sender); // May be last-four of node if unprintable (emoji, etc)
+-        header += " (";
+-        header += parse(sender->long_name);
+-        header += ")";
+-    } else
++    std::string sName = sender ? parseShortName(sender) : ""; // May be last-four of node if unprintable (emoji, etc)
++    std::string lName = (sender && nodeInfoLiteHasUser(sender)) ? parse(EmojiSubs::cleanNodeName(sender->long_name)) : "";
++    if (sName.empty() && lName.empty())
+         header += hexifyNodeNum(latestMessage->dm.sender);
++    else if (sName.empty())
++        header += lName;
++    else if (lName.empty())
++        header += sName;
++    else
++        header += sName + " (" + lName + ")";
+ 
+     // Draw a "standard" applet header
+     drawHeader(header);
+diff --git a/src/graphics/niche/InkHUD/Applets/User/Tetris/TetrisApplet.cpp b/src/graphics/niche/InkHUD/Applets/User/Tetris/TetrisApplet.cpp
+index 36c0315a1..5ffe051a2 100644
+--- a/src/graphics/niche/InkHUD/Applets/User/Tetris/TetrisApplet.cpp
++++ b/src/graphics/niche/InkHUD/Applets/User/Tetris/TetrisApplet.cpp
+@@ -421,8 +421,9 @@ void InkHUD::TetrisApplet::onRender(bool full)
+             const std::string stats = "Sc " + to_string(score) + "  Lv " + to_string(level) + "  Ln " + to_string(lines);
+             printAt(wellL, hudT, stats, LEFT, TOP);
+ 
+-            // Next-piece preview, right-aligned in the strip
+-            const int16_t pcell = 4;
++            // Next-piece preview, right-aligned in the strip.
++            // Box nearly fills the strip's 2-line height; the short hint lives to its left
++            const int16_t pcell = 5;
+             const int16_t boxW = 4 * pcell + 3;
+             const int16_t bx = width() - boxW - 2;
+             const int16_t by = hudT - 1;
+@@ -436,10 +437,13 @@ void InkHUD::TetrisApplet::onRender(bool full)
+ 
+             const int16_t cy2 = hudT + fontSmall.lineHeight() + 3;
+             if (cy2 + fontSmall.lineHeight() <= height() - 1) {
+-                std::string hint = "Tap: pause  Btn: quit";
+-                if (getTextWidth(hint) > wellW)
+-                    hint = "Tap:pause  Btn:quit";
++                // Keep the hint clear of the preview box on the right (the strip has no room to stack
++                // them vertically), and with control keys named as they actually are
++                const int16_t hintMaxW = bx - wellL - 3;
++                std::string hint = "OK: pause";
++                setCrop(wellL, cy2, hintMaxW, fontSmall.lineHeight());
+                 printAt(wellL, cy2, hint, LEFT, TOP);
++                resetCrop();
+             }
+         }
+     } else {
+diff --git a/src/graphics/niche/InkHUD/EmojiSubs.cpp b/src/graphics/niche/InkHUD/EmojiSubs.cpp
+new file mode 100644
+index 000000000..11793fbe3
+--- /dev/null
++++ b/src/graphics/niche/InkHUD/EmojiSubs.cpp
+@@ -0,0 +1,221 @@
++#include "EmojiSubs.h"
++
++#include "./InkHUD.h"
++#include "./Persistence.h"
++
++namespace NicheGraphics::InkHUD
++
++{
++// Sorted by codepoint; lookup is binary search. Keep in order!
++struct Entry {
++    uint32_t cp;
++    const char *text;
++};
++
++static const Entry table[] = {
++    {0x203C, "!!"},      {0x2139, "info"},   {0x2600, "sun"},     {0x2601, "cloud"},   {0x2614, "rain"},
++    {0x2615, "coffee"},  {0x263A, ":)"},     {0x26A0, "!"},       {0x26BD, "soccer"},  {0x2705, "ok"},
++    {0x2708, "plane"},   {0x270C, "peace"},  {0x270F, "note"},    {0x2744, "snow"},    {0x274C, "no"},
++    {0x2753, "?"},       {0x2757, "!"},      {0x2764, "<3"},      {0x27A1, "->"},      {0x2B50, "star"},
++    {0x1F308, "rainbow"}, {0x1F310, "globe"}, {0x1F319, "moon"}, {0x1F31E, "earth"},  {0x1F334, "palm"},   {0x1F337, "tulip"},
++    {0x1F339, "rose"},   {0x1F33B, "sunflow"}, {0x1F344, "mushroom"}, {0x1F34E, "apple"}, {0x1F354, "burger"},
++    {0x1F355, "pizza"},  {0x1F35A, "rice"},  {0x1F35E, "bread"},  {0x1F363, "sushi"},  {0x1F369, "donut"},
++    {0x1F370, "cake"},   {0x1F37A, "beer"},  {0x1F37B, "beers"},  {0x1F37E, "cheers"}, {0x1F381, "gift"},
++    {0x1F382, "bday"},   {0x1F384, "xmas"},  {0x1F389, "yay"},    {0x1F393, "grad"},   {0x1F3A4, "mic"},
++    {0x1F3AE, "game"},   {0x1F3B0, "jackpot"}, {0x1F3B5, "music"}, {0x1F3C0, "basket"}, {0x1F3C6, "trophy"},
++    {0x1F3C8, "football"}, {0x1F3E0, "home"}, {0x1F431, "cat"},   {0x1F436, "dog"},    {0x1F440, "eyes"},
++    {0x1F446, "^"},      {0x1F447, "v"},     {0x1F448, "<"},      {0x1F449, ">"},      {0x1F44A, "pow"},
++    {0x1F44B, "hi"},     {0x1F44C, "ok"},    {0x1F44D, "+1"},     {0x1F44E, "-1"},     {0x1F44F, "clap"},
++    {0x1F464, "person"}, {0x1F465, "people"}, {0x1F47B, "ghost"}, {0x1F47D, "alien"},  {0x1F47F, "devil"},
++    {0x1F480, "rip"},    {0x1F48B, "kiss"},  {0x1F493, "love"},   {0x1F494, "</3"},    {0x1F495, "hearts"},
++    {0x1F499, "<3"},     {0x1F49A, "<3"},    {0x1F49B, "<3"},     {0x1F49C, "<3"},     {0x1F4A1, "idea"},
++    {0x1F4A5, "boom"},   {0x1F4A9, "poop"},  {0x1F4AA, "fight"},  {0x1F4AB, "dizzy"},  {0x1F4AF, "100"},
++    {0x1F4B0, "money"},  {0x1F4B8, "money"}, {0x1F4C4, "doc"},    {0x1F4C5, "date"},   {0x1F4C8, "up-trend"},
++    {0x1F4CD, "pin"},    {0x1F4DD, "note"},  {0x1F4E1, "antenna"}, {0x1F4E2, "shout"},  {0x1F4E3, "shout"},
++    {0x1F4E6, "box"},    {0x1F4F1, "phone"},  {0x1F4F6, "bars"},   {0x1F4F7, "photo"},  {0x1F4FA, "tv"},
++    {0x1F50C, "plug"},   {0x1F511, "key"},    {0x1F512, "locked"},
++    {0x1F514, "ping"},   {0x1F525, "fire"},  {0x1F550, "time"},   {0x1F600, ":D"},     {0x1F601, ":)"},
++    {0x1F602, "lol"},    {0x1F604, ":D"},    {0x1F605, ":S"},     {0x1F606, ":D"},     {0x1F607, "o:)"},
++    {0x1F608, ">:)"},    {0x1F609, ";)"},    {0x1F60A, ":)"},     {0x1F60B, ":P"},     {0x1F60D, "<3"},
++    {0x1F610, ":|"},     {0x1F612, ":/"},    {0x1F614, ":(("},    {0x1F615, ":/"},     {0x1F618, ":*"},
++    {0x1F61C, ";P"},     {0x1F620, ">:("},   {0x1F62D, ":'("},    {0x1F631, ":O"},     {0x1F634, "zZ"},
++    {0x1F642, ":-)"},    {0x1F643, ":/"},    {0x1F644, ":|"},     {0x1F64F, "plz"},    {0x1F680, "rocket"},
++    {0x1F697, "car"},    {0x1F6A8, "siren"}, {0x1F6AC, "smoke"},  {0x1F7E0, "[red]"},  {0x1F7E1, "[orange]"},
++    {0x1F7E2, "[green]"}, {0x1F7E3, "[blue]"}, {0x1F914, "hmm"},  {0x1F916, "bot"},    {0x1F917, "hug"},
++    {0x1F918, "rock"},
++    {0x1F91D, "deal"},   {0x1F91E, "hope"},  {0x1F923, "rofl"},   {0x1F929, "wow"},    {0x1F970, "aww"},
++    {0x1F973, "party"},  {0x1F974, "meh"},   {0x1F97A, "uwu"},    {0x1F984, "unicorn"}, {0x1F9C0, "cheese"},
++};
++
++static constexpr size_t tableCount = sizeof(table) / sizeof(table[0]);
++
++static const char *lookup(uint32_t cp)
++{
++    size_t lo = 0, hi = tableCount;
++    while (lo < hi) {
++        size_t mid = (lo + hi) / 2;
++        if (table[mid].cp < cp)
++            lo = mid + 1;
++        else if (table[mid].cp > cp)
++            hi = mid;
++        else
++            return table[mid].text;
++    }
++    return nullptr;
++}
++
++// Decode one UTF-8 sequence at pos. Returns false on malformed / truncated input.
++static bool decode(const std::string &s, size_t pos, size_t &len, uint32_t &cp)
++{
++    unsigned char b = s[pos];
++    if (b < 0x80) {
++        len = 1;
++        cp = b;
++        return true;
++    }
++    size_t need;
++    if ((b & 0xE0) == 0xC0) {
++        need = 1;
++        cp = b & 0x1F;
++    } else if ((b & 0xF0) == 0xE0) {
++        need = 2;
++        cp = b & 0x0F;
++    } else if ((b & 0xF8) == 0xF0) {
++        need = 3;
++        cp = b & 0x07;
++    } else
++        return false;
++    if (pos + need > s.size() - 1)
++        return false; // truncated
++    len = need + 1;
++    for (size_t k = 1; k < len; k++) {
++        unsigned char c = s[pos + k];
++        if ((c & 0xC0) != 0x80)
++            return false;
++        cp = (cp << 6) | (c & 0x3F);
++    }
++    return true;
++}
++
++static bool isEmojiRange(uint32_t cp)
++{
++    return (cp >= 0x1F000 && cp <= 0x1FAFF) || (cp >= 0x2600 && cp <= 0x27BF) || (cp >= 0x2B00 && cp <= 0x2BFF);
++}
++
++std::string EmojiSubs::cleanNodeName(const std::string &in)
++{
++    std::string out;
++    std::string firstEmojiName;
++    out.reserve(in.size());
++
++    size_t i = 0;
++    const size_t n = in.size();
++    while (i < n) {
++        size_t len;
++        uint32_t cp;
++        if (!decode(in, i, len, cp)) {
++            out += in[i]; // invalid byte: keep, parse() will deal with it as before
++            i++;
++            continue;
++        }
++        const size_t start = i;
++        i += len;
++
++        if (cp == 0xFE0F || cp == 0xFE0E || cp == 0x200D || (cp >= 0x1F3FB && cp <= 0x1F3FF))
++            continue; // pure decoration
++        if (isEmojiRange(cp)) {
++            if (firstEmojiName.empty()) {
++                const char *r = lookup(cp);
++                if (r)
++                    firstEmojiName = r;
++            }
++            continue; // emoji are cut from names
++        }
++        out.append(in, start, len);
++    }
++
++    // Trim surrounding spaces
++    const size_t b = out.find_first_not_of(' ');
++    const size_t e = out.find_last_not_of(' ');
++    if (b == std::string::npos)
++        out.clear();
++    else
++        out = out.substr(b, e - b + 1);
++
++    // Name was pure emoji: show the first emoji's text name instead of an empty card
++    if (out.empty())
++        return firstEmojiName;
++    return out;
++}
++
++std::string EmojiSubs::apply(const std::string &in, bool dropUnknown)
++{
++    InkHUD *ih = InkHUD::getInstance();
++    if (!ih || !ih->persistence)
++        return in;
++    if (!ih->persistence->settings.optionalFeatures.emojiText)
++        return in;
++
++    // Fast path: plain ascii passes through untouched
++    bool anyHigh = false;
++    for (char c : in) {
++        if ((unsigned char)c >= 0x80) {
++            anyHigh = true;
++            break;
++        }
++    }
++    if (!anyHigh)
++        return in;
++
++    std::string out;
++    out.reserve(in.size());
++
++    size_t i = 0;
++    const size_t n = in.size();
++    while (i < n) {
++        size_t len;
++        uint32_t cp;
++        if (!decode(in, i, len, cp)) {
++            out += in[i]; // byte of something we don't speak: pass through unchanged
++            i++;
++            continue;
++        }
++
++        // Variation selectors and skin-tone modifiers are noise on a text terminal: drop them
++        if (cp == 0xFE0F || cp == 0xFE0E || (cp >= 0x1F3FB && cp <= 0x1F3FF)) {
++            i += len;
++            continue;
++        }
++        // ZWJ glues emoji into sequences; render the glue as '+' (man+woman+girl)
++        if (cp == 0x200D) {
++            out += '+';
++            i += len;
++            continue;
++        }
++        // Regional-indicator pairs become the two-letter country code (flag -> "DE")
++        if (cp >= 0x1F1E6 && cp <= 0x1F1FF) {
++            size_t len2;
++            uint32_t cp2;
++            if (i + len < n && decode(in, i + len, len2, cp2) && cp2 >= 0x1F1E6 && cp2 <= 0x1F1FF) {
++                out += (char)('A' + (cp - 0x1F1E6));
++                out += (char)('A' + (cp2 - 0x1F1E6));
++                i += len + len2;
++                continue;
++            }
++            out.append(in, i, len);
++            i += len;
++            continue;
++        }
++
++        const char *r = lookup(cp);
++        if (r)
++            out += r;
++        else if (dropUnknown && isEmojiRange(cp))
++            ; // unknown emoji-range codepoint: drop silently (node names)
++        else
++            out.append(in, i, len); // unknown: keep original bytes (prior behavior)
++        i += len;
++    }
++    return out;
++}
++} // namespace NicheGraphics::InkHUD
+diff --git a/src/graphics/niche/InkHUD/EmojiSubs.h b/src/graphics/niche/InkHUD/EmojiSubs.h
+new file mode 100644
+index 000000000..4a5b183b0
+--- /dev/null
++++ b/src/graphics/niche/InkHUD/EmojiSubs.h
+@@ -0,0 +1,26 @@
++#pragma once
++
++#include "configuration.h"
++
++#include <string>
++
++namespace NicheGraphics::InkHUD
++
++{
++// Replace the most common emoji codepoints with short ascii text, so that they survive the
++// monochrome bitmap fonts (which have no glyph beyond WIN1251 and draw "??" boxes instead).
++// Gated by settings.optionalFeatures.emojiText; apply() is a no-op when the toggle is off.
++class EmojiSubs {
++  public:
++    // Replace known emoji codepoints with ascii text. With dropUnknown=true, unknown emoji-range
++    // codepoints are deleted instead of passed through — for short fields like node names where a
++    // row of "??" boxes is uglier than the missing character.
++    static std::string apply(const std::string &utf8, bool dropUnknown = false);
++
++    // Sanitize a node name: drop all emoji, trim surrounding spaces.
++    // If nothing textual remains but the name contained emoji, return the first emoji's
++    // text name ("bot", "antenna"); if that fails too, return empty (caller falls back to id).
++    // Always active (independent of the Emoji as Text setting, which covers message bodies).
++    static std::string cleanNodeName(const std::string &utf8);
++};
++} // namespace NicheGraphics::InkHUD
+diff --git a/src/graphics/niche/InkHUD/Persistence.h b/src/graphics/niche/InkHUD/Persistence.h
+index 357607ea5..8688dd3a4 100644
+--- a/src/graphics/niche/InkHUD/Persistence.h
++++ b/src/graphics/niche/InkHUD/Persistence.h
+@@ -29,7 +29,7 @@ class Persistence
+ 
+     // Used to invalidate old settings, if needed
+     // Version 0 is reserved for testing, and will always load defaults
+-    static constexpr uint32_t SETTINGS_VERSION = 3;
++    static constexpr uint32_t SETTINGS_VERSION = 5;
+ 
+     struct Settings {
+         struct Meta {
+@@ -70,6 +70,12 @@ class Persistence
+         struct OptionalFeatures {
+             bool notifications = true;
+             bool batteryIcon = false;
++            // Replace emoji codepoints with short ascii text before drawing (EmojiSubs)
++            bool emojiText = true;
++            // Node list cards: long name as the bold title, short name below
++            bool longNamesFirst = true;
++            // Spare bytes: future flags should replace these, so the blob size stays stable (no settings reset)
++            uint8_t _reserve[7] = {};
+         } optionalFeatures;
+ 
+         // Some menu items may not be required, based on device / configuration
+@@ -101,6 +107,9 @@ class Persistence
+             // Modifies the UI for joystick use
+             bool enabled = false;
+ 
++            // Holding a direction repeatedly fires it (TwoButtonExtended auto-repeat)
++            bool repeat = true;
++
+             // gets set to true when AlignStick applet is completed
+             bool aligned = false;
+ 
+diff --git a/src/graphics/niche/Inputs/TwoButtonExtended.cpp b/src/graphics/niche/Inputs/TwoButtonExtended.cpp
+index bb5904cb6..3669a2870 100644
+--- a/src/graphics/niche/Inputs/TwoButtonExtended.cpp
++++ b/src/graphics/niche/Inputs/TwoButtonExtended.cpp
+@@ -219,6 +219,16 @@ void TwoButtonExtended::setJoystickPressHandlers(Callback uPress, Callback dPres
+     joystick[Direction::RIGHT].onPress = rPress;
+ }
+ 
++void TwoButtonExtended::setJoystickRepeat(bool enabled)
++{
++    joystickRepeatEnabled = enabled;
++    // Drop any stale timing so a re-enable cannot fire instantly
++    if (enabled) {
++        for (auto &j : joystick)
++            j.repeatAtMillis = 0;
++    }
++}
++
+ // Set press handlers for a two-way rocker mapped to left/right directions
+ void TwoButtonExtended::setTwoWayRockerPressHandlers(Callback lPress, Callback rPress)
+ {
+@@ -456,6 +466,7 @@ int32_t TwoButtonExtended::runOnce()
+                     // Run callback: long press (once)
+                     // Then continue waiting for release, to rearm
+                     joystick[i].state = State::POLLING_FIRED;
++                    joystick[i].repeatAtMillis = millis();
+                     joystick[i].onPress();
+                 }
+             }
+@@ -471,8 +482,18 @@ int32_t TwoButtonExtended::runOnce()
+                 joystick[i].onUp(); // Callback: release of hold
+             }
+             // Not yet released, keep polling
+-            else
++            else {
+                 awaitingRelease = true;
++                // Hold-repeat: while a direction is held past the initial delay, fire it at a steady rate
++                if (joystickRepeatEnabled) {
++                    const uint32_t now = millis();
++                    if (now - joystick[i].irqAtMillis >= JOY_REPEAT_INITIAL_MS &&
++                        now - joystick[i].repeatAtMillis >= JOY_REPEAT_RATE_MS) {
++                        joystick[i].repeatAtMillis = now;
++                        joystick[i].onPress();
++                    }
++                }
++            }
+             break;
+         }
+     }
+diff --git a/src/graphics/niche/Inputs/TwoButtonExtended.h b/src/graphics/niche/Inputs/TwoButtonExtended.h
+index d181dd006..4b0d3de06 100644
+--- a/src/graphics/niche/Inputs/TwoButtonExtended.h
++++ b/src/graphics/niche/Inputs/TwoButtonExtended.h
+@@ -54,6 +54,10 @@ class TwoButtonExtended : protected concurrency::OSThread
+     void setJoystickPressHandlers(Callback uPress, Callback dPress, Callback lPress, Callback rPress);
+     void setTwoWayRockerPressHandlers(Callback lPress, Callback rPress);
+ 
++    // While a joystick direction is held past the initial delay, its press handler fires repeatedly.
++    // Off by default; the InkHUD menu exposes it as an option and nicheGraphics applies the stored setting.
++    void setJoystickRepeat(bool enabled);
++
+     // Disconnect and reconnect interrupts for light sleep
+ #ifdef ARCH_ESP32
+     int beforeLightSleep(void *unused);
+@@ -80,6 +84,8 @@ class TwoButtonExtended : protected concurrency::OSThread
+         uint8_t pin = 0xFF;                 // 0xFF: unset
+         volatile State state = State::REST; // Internal state
+         volatile uint32_t irqAtMillis;      // millis() when button went down
++        volatile uint32_t repeatAtMillis =
++            0; // millis() of the last (auto-)repeat fired while held; joystick hold-repeat only
+ 
+         // Per-button event callbacks
+         static void noop() {};
+@@ -128,6 +134,11 @@ class TwoButtonExtended : protected concurrency::OSThread
+     bool joystickActiveLogic = LOW;       // Active LOW by default
+     uint32_t joystickDebounceLength = 50; // time until press in ms
+     SimpleButton joystick[4];
++
++    // Joystick hold-repeat
++    bool joystickRepeatEnabled = false;
++    static constexpr uint32_t JOY_REPEAT_INITIAL_MS = 800; // hold this long before the first repeat
++    static constexpr uint32_t JOY_REPEAT_RATE_MS = 800;    // then fire every this long
+ };
+ 
+ }; // namespace NicheGraphics::Inputs
+diff --git a/variants/nrf52840/seeed_wio_tracker_L1_eink/nicheGraphics.h b/variants/nrf52840/seeed_wio_tracker_L1_eink/nicheGraphics.h
+index c85895e30..ecd7fbb33 100644
+--- a/variants/nrf52840/seeed_wio_tracker_L1_eink/nicheGraphics.h
++++ b/variants/nrf52840/seeed_wio_tracker_L1_eink/nicheGraphics.h
+@@ -109,6 +109,7 @@ void setupNicheGraphics()
+     buttons->setJoystickDebounce(50);
+     buttons->setJoystickPressHandlers([inkhud]() { inkhud->navUp(); }, [inkhud]() { inkhud->navDown(); },
+                                       [inkhud]() { inkhud->navLeft(); }, [inkhud]() { inkhud->navRight(); });
++    buttons->setJoystickRepeat(inkhud->persistence->settings.joystick.repeat);
+ #else
+     // #0: User Button
+     buttons->setWiring(0, Inputs::TwoButtonExtended::getUserButtonPin());
+-- 
+2.53.0
+
