@@ -1,7 +1,7 @@
 From 2494107529482d63cbb1b9d427e577d92db1a128 Mon Sep 17 00:00:00 2001
 From: Denis Zolotarev <judaeus@gmail.com>
 Date: Tue, 24 Nov 2026 16:08:31 +0200
-Subject: [PATCH 3/3] =?UTF-8?q?feat(inkhud):=20L1=20e-ink=20day=202=20?=
+Subject: [PATCH 3/4] =?UTF-8?q?feat(inkhud):=20L1=20e-ink=20day=202=20?=
  =?UTF-8?q?=E2=80=94=20fixed-zoom=20z12=20city=20map=20with=20pan=20&=20ed?=
  =?UTF-8?q?ge-clamped=20markers,=20Nodes=20detail=20card=20(bullets,=20wra?=
  =?UTF-8?q?p,=20compose-by-hold),=20stable=20MQTT=20badge=20+=20classic=20?=

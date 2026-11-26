@@ -1,0 +1,205 @@
+From 17e0bf2fec3a919097326a23b93546208dfc9a37 Mon Sep 17 00:00:00 2001
+From: Denis Zolotarev <judaeus@gmail.com>
+Date: Thu, 26 Nov 2026 23:18:05 +0200
+Subject: [PATCH 4/4] =?UTF-8?q?feat(inkhud):=20L1=20e-ink=20day=203=20?=
+ =?UTF-8?q?=E2=80=94=20map=20shortName=20labels,=20edge-clamped=20view=20b?=
+ =?UTF-8?q?ounds=20vs=20bad=20fixes,=20map=20compose=20reverted=20to=20sta?=
+ =?UTF-8?q?ndard=20menu?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../InkHUD/Applets/Bases/Map/MapApplet.cpp    | 64 ++++++++++++++++++-
+ .../InkHUD/Applets/Bases/Map/MapApplet.h      |  9 ++-
+ .../Applets/User/MeshMap/MeshMapApplet.cpp    | 20 +-----
+ .../Applets/User/MeshMap/MeshMapApplet.h      |  2 -
+ 4 files changed, 70 insertions(+), 25 deletions(-)
+
+diff --git a/src/graphics/niche/InkHUD/Applets/Bases/Map/MapApplet.cpp b/src/graphics/niche/InkHUD/Applets/Bases/Map/MapApplet.cpp
+index 32009125b..bebf7a1c6 100644
+--- a/src/graphics/niche/InkHUD/Applets/Bases/Map/MapApplet.cpp
++++ b/src/graphics/niche/InkHUD/Applets/Bases/Map/MapApplet.cpp
+@@ -307,6 +307,38 @@ static int findEmbeddedTile(int zoom, int tx, int ty)
+     return -1;
+ }
+ 
++// Bad GPS fixes (or a mesh centroid dragged far away) anchor the view outside our baked tile
++// grid, which silently loses the basemap. Snap the center back to the grid's midpoint.
++void InkHUD::MapApplet::clampCenterToTiles()
++{
++    const int zoom = tileZoomLevel();
++    int minTx = INT32_MAX, maxTx = -1, minTy = INT32_MAX, maxTy = -1;
++    for (int i = 0; i < map_tile_count; i++) {
++        if (tileZoomAt(i) != zoom)
++            continue;
++        const int tx = tileTxAt(i), ty = tileTyAt(i);
++        minTx = min(minTx, tx);
++        maxTx = max(maxTx, tx);
++        minTy = min(minTy, ty);
++        maxTy = max(maxTy, ty);
++    }
++    if (maxTx < 0)
++        return;
++
++    const float worldPx = 256.0f * (float)(1 << zoom);
++    const float sinLat = sinf(latCenter * DEG_TO_RAD);
++    const float gpxX = ((lngCenter + 180.0f) / 360.0f) * worldPx;
++    const float gpxY = (0.5f - logf((1.0f + sinLat) / (1.0f - sinLat)) / (4.0f * M_PI)) * worldPx;
++    // Center may roam only as far as keeps the full window covered by tiles
++    const float clX = constrain(gpxX, (float)minTx * 256.0f + width() * 0.5f, (float)(maxTx + 1) * 256.0f - width() * 0.5f);
++    const float clY = constrain(gpxY, (float)minTy * 256.0f + height() * 0.5f, (float)(maxTy + 1) * 256.0f - height() * 0.5f);
++    if (clX == gpxX && clY == gpxY)
++        return;
++
++    lngCenter = clX / worldPx * 360.0f - 180.0f;
++    latCenter = atanf(sinhf(M_PI * (1.0f - 2.0f * clY / worldPx))) / DEG_TO_RAD;
++}
++
+ // Draw tiles centered on latCenter/lngCenter. Falls back to the nearest available zoom if
+ // no tiles exist at exactly zoom (upsamples), enabling smooth zoom steps.
+ void InkHUD::MapApplet::drawMapTileBackground(int zoom)
+@@ -398,6 +430,8 @@ void InkHUD::MapApplet::onRender(bool full)
+         lngCenter += panEastMeters / (111320.0f * cosf(latCenter * DEG_TO_RAD));
+     }
+ 
++    clampCenterToTiles();
++
+     calculateAllMarkers();
+ 
+     // Show placeholder only if we have no position at all - no tiles, no own node
+@@ -450,6 +484,10 @@ void InkHUD::MapApplet::onRender(bool full)
+     };
+ 
+     // Draw all markers first
++    struct LabelBox {
++        int16_t x, y, w, h;
++    };
++    std::vector<LabelBox> labelBoxes;
+     for (Marker m : markers) {
+         int16_t x = X(0.5) + (int16_t)(m.eastMeters * metersToPx);
+         int16_t y = Y(0.5) - (int16_t)(m.northMeters * metersToPx);
+@@ -463,6 +501,27 @@ void InkHUD::MapApplet::onRender(bool full)
+         int boxSize = fontSmall.lineHeight() + 2; // scale with font so digit fits
+         int radius = max(2, boxSize / 6);
+ 
++        // Short-name label in a white strip; skipped when it would collide with another label
++        if (m.shortName[0]) {
++            setFont(fontSmall);
++            const int16_t labelW = getTextWidth(m.shortName);
++            const int16_t labelH = fontSmall.lineHeight();
++            int16_t lx = x + boxSize / 2 + 3;
++            if (lx + labelW > width() - 2)
++                lx = x - boxSize / 2 - 3 - labelW;
++            const int16_t ly = y - labelH / 2;
++            bool collides = false;
++            for (const LabelBox &b : labelBoxes) {
++                if (lx < b.x + b.w + 2 && lx + labelW > b.x - 2 && ly < b.y + b.h + 2 && ly + labelH > b.y - 2)
++                    collides = true;
++            }
++            if (lx >= 2 && ly >= 2 && ly + labelH <= height() - 2 && !collides) {
++                fillRect(lx - 1, ly - 1, labelW + 2, labelH + 1, WHITE);
++                printAt(lx, ly, m.shortName, LEFT, TOP);
++                labelBoxes.push_back({lx, ly, labelW, (int16_t)labelH});
++            }
++        }
++
+         // White halo background
+         fillRoundedRect(x, y, boxSize + (outlinePad * 2), boxSize + (outlinePad * 2), radius + 1, WHITE);
+ 
+@@ -1105,7 +1164,10 @@ void InkHUD::MapApplet::calculateAllMarkers()
+         if (!nodeDB->copyNodePosition(node->num, pos))
+             continue;
+ 
+-        markers.push_back(calculateMarker(pos.latitude_i * 1e-7, pos.longitude_i * 1e-7, node->hops_away));
++        Marker marker = calculateMarker(pos.latitude_i * 1e-7, pos.longitude_i * 1e-7, node->hops_away);
++        const std::string sName = parseShortName(node);
++        snprintf(marker.shortName, sizeof(marker.shortName), "%s", sName.c_str());
++        markers.push_back(marker);
+     }
+ 
+     // Cache waypoint markers once per render pass to avoid repeated geo math below.
+diff --git a/src/graphics/niche/InkHUD/Applets/Bases/Map/MapApplet.h b/src/graphics/niche/InkHUD/Applets/Bases/Map/MapApplet.h
+index a630ca373..05ef22134 100644
+--- a/src/graphics/niche/InkHUD/Applets/Bases/Map/MapApplet.h
++++ b/src/graphics/niche/InkHUD/Applets/Bases/Map/MapApplet.h
+@@ -73,11 +73,14 @@ class MapApplet : public Applet
+ 
+     // The single zoom level we draw: whatever the baked-in tiles provide (13 if none)
+     static int tileZoomLevel();
++    // Keep the view center inside the baked tile grid (guards against bad GPS fixes)
++    void clampCenterToTiles();
+     // Position and size of a marker to be drawn
+     struct Marker {
+-        float eastMeters = 0;  // Meters east of map center. Negative if west.
+-        float northMeters = 0; // Meters north of map center. Negative if south.
+-        uint8_t hopsAway = 0;  // Determines marker size
++        float eastMeters = 0;   // Meters east of map center. Negative if west.
++        float northMeters = 0;  // Meters north of map center. Negative if south.
++        uint8_t hopsAway = 0;   // Determines marker size
++        char shortName[8] = ""; // Node short name, drawn beside the marker
+     };
+ 
+     struct WaypointMarker {
+diff --git a/src/graphics/niche/InkHUD/Applets/User/MeshMap/MeshMapApplet.cpp b/src/graphics/niche/InkHUD/Applets/User/MeshMap/MeshMapApplet.cpp
+index e42573944..4cce97608 100644
+--- a/src/graphics/niche/InkHUD/Applets/User/MeshMap/MeshMapApplet.cpp
++++ b/src/graphics/niche/InkHUD/Applets/User/MeshMap/MeshMapApplet.cpp
+@@ -2,13 +2,10 @@
+ 
+ #include "./MeshMapApplet.h"
+ 
+-#include "graphics/niche/InkHUD/Applets/System/Menu/MenuApplet.h"
+-
+ using namespace NicheGraphics;
+ 
+ static constexpr uint8_t ALL_MAP_INPUTS =
+-    InkHUD::Applet::NAV_UP | InkHUD::Applet::NAV_DOWN | InkHUD::Applet::NAV_LEFT | InkHUD::Applet::NAV_RIGHT |
+-    InkHUD::Applet::BUTTON_LONG;
++    InkHUD::Applet::NAV_UP | InkHUD::Applet::NAV_DOWN | InkHUD::Applet::NAV_LEFT | InkHUD::Applet::NAV_RIGHT;
+ 
+ void InkHUD::MeshMapApplet::onActivate()
+ {
+@@ -45,19 +42,4 @@ void InkHUD::MeshMapApplet::onNavRight()
+     panBy(viewWidthMeters() * 0.5f, 0.0f);
+     requestUpdate(Drivers::EInk::UpdateTypes::FAST);
+ }
+-
+-// Hold center: write to the node nearest screen center; plain menu otherwise
+-void InkHUD::MeshMapApplet::onButtonLongPress()
+-{
+-    const NodeNum dest = nodeNearestCenter(30.0f);
+-    if (dest == 0) {
+-        inkhud->openMenu(); // no node under the cursor: behave like any other applet
+-        return;
+-    }
+-
+-    inkhud->openMenu();
+-    MenuApplet *menu = static_cast<MenuApplet *>(inkhud->getSystemApplet("Menu"));
+-    if (menu)
+-        menu->messageTo(dest);
+-}
+ #endif
+diff --git a/src/graphics/niche/InkHUD/Applets/User/MeshMap/MeshMapApplet.h b/src/graphics/niche/InkHUD/Applets/User/MeshMap/MeshMapApplet.h
+index f1ffdc8dc..9ea377158 100644
+--- a/src/graphics/niche/InkHUD/Applets/User/MeshMap/MeshMapApplet.h
++++ b/src/graphics/niche/InkHUD/Applets/User/MeshMap/MeshMapApplet.h
+@@ -4,7 +4,6 @@
+ 
+ Fixed-zoom map of every node with a position, drawn over baked-in tiles.
+ Joystick pans the view; holding repeats (TwoButtonExtended auto-repeat).
+-Holding the center button writes a message to the node nearest the screen center.
+ 
+ All heavy lifting is in InkHUD::MapApplet.
+ 
+@@ -32,7 +31,6 @@ class MeshMapApplet : public MapApplet
+     void onNavDown() override;
+     void onNavLeft() override;
+     void onNavRight() override;
+-    void onButtonLongPress() override;
+ };
+ 
+ } // namespace NicheGraphics::InkHUD
+-- 
+2.53.0
+

@@ -6,13 +6,13 @@ joystick panning, a node browser with detail cards and message composition, hold
 navigation, sound modes, and a Tetris applet. This repo holds the prebuilt firmware, the patchset
 and the change notes — the source of truth is the upstream fork + `patches/`.
 
-База: **upstream Meshtastic firmware `2.8.2` @ `d5f16191c`**. Всё изменение — три коммита,
-приложены как `git format-patch` в `patches/` (36 файлов, +5890/−370, из них ~4000 строк —
+База: **upstream Meshtastic firmware `2.8.2` @ `d5f16191c`**. Всё изменение — четыре коммита,
+приложены как `git format-patch` в `patches/` (36 файлов, +5939/−374, из них ~4000 строк —
 генерируемая таблица тайлов карты и эмодзи-таблица).
 
 ---
 
-## Что внутри (по состоянию на 2026-11-24, тег `l1eink-stable-20261124`)
+## Что внутри (по состоянию на 2026-11-26, тег `l1eink-stable-20261126`)
 
 ### Русский язык и текст
 - Шрифты InkHUD переведены на WIN1251-варианты FreeSans 6/9/12pt (`-D OLED_RU`).
@@ -27,7 +27,12 @@ and the change notes — the source of truth is the upstream fork + `patches/`.
   Тайлы генерируются внешним osm-eink-экспортером в `MapTile.h` (формат таблицы — upstream).
 - **Панорамирование джойстиком** (полэкрана за шаг, удержание = автоповтор), точка «я» и маркеры
   нод клампятся к краю экрана — не теряются при пане. В меню — «Reset View» после смещения.
-- Долгое нажатие центра на карте = написать сообщение ноде, чья метка ближе всех к центру.
+- Кламп центра к сетке тайлов: если якорь вида (битый GPS-фикс или центроид mesh) оказывается
+  за пределами вшитой сетки — вид ограничивается краем грида, подложка не может пропасть,
+  пан не «пружинит».
+- Подписи нод на карте: short name рядом с маркером (белая подложка, перекрывающиеся подписи
+  пропускаются, нечитаемое имя → `#последние4`).
+- Долгое нажатие центра на карте = стандартное меню InkHUD (как у прочих апплетов).
 - История: доступ к внешней QSPI NOR (2 МБ LittleFS) для больших карт был реализован и проверен
   (пины в `variant.h` в патчах исправлены на фактическую разводку!), но **откатан**: чтение тайлов
   с ФС в живом использовании подвешивало UI. Карта снова только из flash.
@@ -67,14 +72,14 @@ and the change notes — the source of truth is the upstream fork + `patches/`.
 - Сборка: `pio run -e seeed_wio_tracker_L1_eink-inkhud` (PlatformIO, Arduino nRF52 core).
 - Прошивка: двойной клик RST (или `stty 1200` на CDC) → скопировать `firmware/*.uf2` на диск
   `TRACKER L1`. UF2-перепрошивка не трогает внутренние настройки и внешнюю flash.
-- Размеры образа: Flash 94.2% (768 КБ), запас 30 КБ до warm-области, RAM 37.9%.
+- Размеры образа: Flash 94.4% (769 784 Б), запас ~45 КБ до warm-области, RAM 37.9%.
 
 ## Как применить патчи к upstream
 
 ```bash
 git clone https://github.com/meshtastic/firmware && cd firmware
 git checkout d5f16191c
-git am patches/0001-*.patch patches/0002-*.patch patches/0003-*.patch
+git am patches/0001-*.patch patches/0002-*.patch patches/0003-*.patch patches/0004-*.patch
 pio run -e seeed_wio_tracker_L1_eink-inkhud
 ```
 

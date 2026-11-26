@@ -1,7 +1,7 @@
 From 83f9e5cdf1c6ee87ffc619abeaded31ee8576599 Mon Sep 17 00:00:00 2001
 From: Denis Zolotarev <judaeus@gmail.com>
 Date: Mon, 23 Nov 2026 12:29:30 +0200
-Subject: [PATCH 1/3] =?UTF-8?q?feat(inkhud):=20L1=20e-ink=20custom=20build?=
+Subject: [PATCH 1/4] =?UTF-8?q?feat(inkhud):=20L1=20e-ink=20custom=20build?=
  =?UTF-8?q?=20d5f1619=20=E2=80=94=20RU=20keyboard=20+=20win1251=20fonts,?=
  =?UTF-8?q?=20chat/list=20scroll=20clamp,=20D13=20applet-cycle=20with=20ch?=
  =?UTF-8?q?irp,=20Tetris=20applet=20(start-park,=20full-screen=20well,=20m?=

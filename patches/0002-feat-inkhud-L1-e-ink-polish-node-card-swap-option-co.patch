@@ -1,7 +1,7 @@
 From a5606a15490b76ddb4dd070d454736b93a4a491e Mon Sep 17 00:00:00 2001
 From: Denis Zolotarev <judaeus@gmail.com>
 Date: Mon, 23 Nov 2026 18:27:43 +0200
-Subject: [PATCH 2/3] =?UTF-8?q?feat(inkhud):=20L1=20e-ink=20polish=20?=
+Subject: [PATCH 2/4] =?UTF-8?q?feat(inkhud):=20L1=20e-ink=20polish=20?=
  =?UTF-8?q?=E2=80=94=20node-card=20swap=20option=20+=20compact=20spacing,?=
  =?UTF-8?q?=20lowercase=20joined=20hops,=20emoji=20handling=20(substitutio?=
  =?UTF-8?q?n=20table=20for=20bodies,=20cleanNodeName=20for=20names),=20joy?=
